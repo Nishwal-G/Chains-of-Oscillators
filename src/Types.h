@@ -1,10 +1,11 @@
+#pragma once
+
 /*This file defines the numerical types, geometry
 choices, simulation paramters. and bead state 
 shared by the rest of the program */
 
 /*tells compiler to process this header only once per
 compilatiomn unit, even if severl incided files refer to it*/
-#pragma once
 
 /*we are importing all necessary definitions*/
 #include <Eigen/Dense>
