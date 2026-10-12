@@ -2,23 +2,19 @@
 
 
 import os
-import hashlib
 import numpy as np
-import subprocess
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import json
-import shutil
-import multiprocessing
 import datetime
-import warnings
+from optimisation_common import DirectionalEvaluator
 
 from scipy.stats import norm as scipy_norm
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import Matern, WhiteKernel, ConstantKernel
 
-from bead_analysis import BeadDataAnalyzer, MultiBeadCoherenceAnalyzer
 
-warnings.filterwarnings("ignore")
 
 MIN_DISTANCE = 3.1   # hard lower bound between adjacent beads
 
@@ -32,145 +28,7 @@ class _NumpyEncoder(json.JSONEncoder):
         return super().default(obj)
 
 
-class BeadBayesianoptimiser:
-    def __init__(self, executable="./modern/modern_Beads",
-                 template_input="BeadsV_6Beads_0Signal_UPDlambda2.input"):
-        self.executable     = executable
-        self.template_input = template_input
-        if not os.path.exists(self.executable):
-            if os.path.exists("./Beads"):
-                self.executable = "./Beads"
-            else:
-                raise FileNotFoundError(f"Executable '{self.executable}' not found.")
-        self._read_template()
-
-
-    def _read_template(self):
-        with open(self.template_input) as fh:
-            self._template_params = fh.readline().strip().split()
-        self.N               = int(self._template_params[0])
-        self.num_inner       = self.N - 2
-        self.default_lambda  = float(self._template_params[21])
-        num_gaps             = self.N - 1
-        template_dists       = [float(self._template_params[22 + i]) for i in range(num_gaps)]
-        self.chain_length    = sum(template_dists)
-        print(f"[Template] N={self.N}, chain_length={self.chain_length:.3f} µm")
-
-    def _positions_to_distances(self, inner_positions):
-        all_pos = [0.0] + list(inner_positions) + [self.chain_length]
-        return [all_pos[i + 1] - all_pos[i] for i in range(self.N - 1)]
-
-    def _is_valid(self, inner_positions):
-        return all(d >= MIN_DISTANCE for d in self._positions_to_distances(inner_positions))
-
-    def _build_params(self, inner_positions, T_signal, F0, total_time, reverse=False):
-        params     = list(self._template_params[:22])
-        params[5]  = str(total_time)
-        params[13] = "50"
-        params[19] = f"{F0:.6f}"
-        params[20] = f"{T_signal:.6f}"
-        distances  = self._positions_to_distances(inner_positions)
-        if reverse:
-            distances = distances[::-1]
-        params += [f"{d:.6f}" for d in distances]
-        params += [f"{self.default_lambda:.6f}"] * self.N
-        return params
-
-
-    def run_single_sim(self, inner_positions, T_signal, F0,
-                       reverse=False, seed_offset=0, total_time=100):
-        run_id = input_file = "unknown"
-        try:
-            params = self._build_params(inner_positions, T_signal, F0, total_time, reverse)
-            state_str  = (f"{seed_offset}_{','.join(f'{p:.4f}' for p in inner_positions)}"
-                          f"_T{T_signal:.6f}_F{F0:.6f}_{'r' if reverse else 'f'}")
-            h          = hashlib.md5(state_str.encode()).hexdigest()[:10]
-            run_id     = f"bo_{os.getpid()}_{h}"
-            input_file = f"{run_id}.input"
-
-            with open(input_file, "w") as fh:
-                fh.write(" ".join(params) + "\n")
-
-            subprocess.run(f"{self.executable} -C -R {input_file}",
-                           shell=True, check=True,
-                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-
-            output_dir = run_id
-            if not os.path.exists(output_dir):
-                return np.nan
-            dat_files = [f for f in os.listdir(output_dir) if f.endswith(".dat")]
-            if not dat_files:
-                shutil.rmtree(output_dir); os.remove(input_file)
-                return np.nan
-
-            analyzer = BeadDataAnalyzer()
-            analyzer.read_data_file(os.path.join(output_dir, dat_files[0]))
-            if analyzer.positions is None or len(analyzer.positions) < 10:
-                shutil.rmtree(output_dir); os.remove(input_file)
-                return np.nan
-
-            mask = analyzer.time_series >= 5.0
-            if np.any(mask):
-                coh_an    = MultiBeadCoherenceAnalyzer(
-                    analyzer.time_series[mask], analyzer.positions[mask])
-                coherence = coh_an.coherence_windowed_real_sum(ref_bead=0)
-                res       = float(coherence[-1])
-            else:
-                res = 0.0
-
-            shutil.rmtree(output_dir); os.remove(input_file)
-            return res if not np.isnan(res) else 0.0
-
-        except Exception:
-            for path in [input_file, run_id]:
-                if path != "unknown":
-                    try:
-                        if os.path.isdir(path):   shutil.rmtree(path)
-                        elif os.path.isfile(path): os.remove(path)
-                    except Exception: pass
-            return np.nan
-
-    def evaluate_state(self, inner_positions, T_signal, F0,
-                       n_runs=3, total_time=100, num_cores=4):
-        """Evaluate a single configuration; used during the BO phase."""
-        results = self._run_tasks(
-            [(inner_positions, T_signal, F0, rev, r, total_time)
-             for r in range(n_runs) for rev in (False, True)],
-            num_cores,
-        )
-        return self._parse_fwd_rev(results, n_runs)
-
-    def _evaluate_batch(self, configs, n_runs, total_time, num_cores):
-
-        tasks = [
-            (pos, T, F0, rev, cfg_i * n_runs + r, total_time)
-            for cfg_i, (pos, T, F0) in enumerate(configs)
-            for r in range(n_runs)
-            for rev in (False, True)
-        ]
-        flat = self._run_tasks(tasks, num_cores)
-
-        # each config occupies a contiguous block of 2*n_runs results
-        # within that block, even indices = fwd, odd = rev (matching task order)
-        sims_per_cfg = 2 * n_runs
-        return [
-            self._parse_fwd_rev(flat[i * sims_per_cfg:(i + 1) * sims_per_cfg], n_runs)
-            for i in range(len(configs))
-        ]
-
-    def _run_tasks(self, tasks, num_cores):
-        with multiprocessing.Pool(processes=min(num_cores, len(tasks))) as pool:
-            return pool.starmap(self.run_single_sim, tasks)
-
-    @staticmethod
-    def _parse_fwd_rev(results, n_runs):
-        fwd_c = [results[2 * r]     for r in range(n_runs) if not np.isnan(results[2 * r])]
-        rev_c = [results[2 * r + 1] for r in range(n_runs) if not np.isnan(results[2 * r + 1])]
-        f = float(np.mean(fwd_c)) if fwd_c else 0.0
-        r = float(np.mean(rev_c)) if rev_c else 0.0
-        return f, r, f - r
-
-
+class BeadBayesianoptimiser(DirectionalEvaluator):
     def _make_bounds(self, T_range, F0_range):
         lo = np.array([0.0] * self.num_inner + [T_range[0],  F0_range[0]])
         hi = np.array([self.chain_length] * self.num_inner + [T_range[1], F0_range[1]])
@@ -186,7 +44,7 @@ class BeadBayesianoptimiser:
 
         N_gaps = self.N - 1
         excess = self.chain_length - N_gaps * MIN_DISTANCE
-        if excess <= 0:
+        if excess < 0:
             raise ValueError(
                 f"Chain length {self.chain_length:.2f} µm is too short for N={self.N} "
                 f"beads with MIN_DISTANCE={MIN_DISTANCE} µm."
@@ -215,7 +73,7 @@ class BeadBayesianoptimiser:
         )
         return GaussianProcessRegressor(
             kernel=kernel,
-            n_restarts_optimiser=5,
+            n_restarts_optimizer=5,
             normalize_y=True,
             random_state=0,
         )
@@ -243,23 +101,6 @@ class BeadBayesianoptimiser:
         best_idx = int(np.argmax(acq_vals))
         return candidates[best_idx], float(acq_vals[best_idx])
 
-    # warm start loader
-    def _load_warm_start(self, json_path, T_range, F0_range):
-
-        with open(json_path) as fh:
-            h = json.load(fh)
-        X, y = [], []
-        for pos, T, F0, asym in zip(h["positions"], h["T_signal"],
-                                    h["F0"],         h["asymmetry"]):
-            if np.isnan(asym): continue
-            if not (T_range[0]  <= T  <= T_range[1]):  continue
-            if not (F0_range[0] <= F0 <= F0_range[1]): continue
-            if not self._is_valid(pos): continue
-            X.append(list(pos) + [T, F0])
-            y.append(float(asym))
-        print(f"[Warm start] Loaded {len(X)} valid points from {json_path}")
-        return np.array(X), np.array(y)
-
     # history helpers
     def _record(self, history, eval_num, pos, T, F0,
                 f, r, asym, phase, best_so_far, acq_val):
@@ -268,8 +109,8 @@ class BeadBayesianoptimiser:
         history["distances"].append([float(d) for d in self._positions_to_distances(pos)])
         history["T_signal"].append(float(T))
         history["F0"].append(float(F0))
-        history["fwd_coh"].append(float(f))
-        history["rev_coh"].append(float(r))
+        history["forward_R"].append(float(f))
+        history["backward_R"].append(float(r))
         history["asymmetry"].append(float(asym))
         history["phase"].append(phase)
         history["best_so_far"].append(float(best_so_far))
@@ -278,7 +119,7 @@ class BeadBayesianoptimiser:
     def save_history(self, history, output_dir):
         path = os.path.join(output_dir, "bo_history.json")
         with open(path, "w") as fh:
-            json.dump(history, fh, indent=4, cls=_NumpyEncoder)
+            json.dump(history, fh, indent=4, cls=_NumpyEncoder, allow_nan=False)
 
 
     def optimise(self,
@@ -303,8 +144,15 @@ class BeadBayesianoptimiser:
         if chain_length is not None:
             self.chain_length = float(chain_length)
 
+        self._prepare_search(T_range, F0_range, n_runs, total_time, num_cores,
+                             n_iterations, output_dir)
+
         ndim      = self.num_inner + 2
         n_initial = n_initial if n_initial is not None else max(8, 2 * ndim)
+        if n_initial != int(n_initial) or n_initial < 1:
+            raise ValueError("n_initial must be a positive integer.")
+        if acquisition not in ("ucb", "ei") or not np.isfinite(kappa) or kappa < 0:
+            raise ValueError("Choose ucb/ei and a finite nonnegative kappa.")
         lo, hi    = self._make_bounds(T_range, F0_range)
 
         if init_positions is not None:
@@ -328,6 +176,8 @@ class BeadBayesianoptimiser:
         print(f"  n_runs={n_runs}  |  total_time={total_time}s  |  cores={num_cores}")
         print(f"{'='*66}\n")
 
+        if not (T_range[0] <= init_T <= T_range[1] and F0_range[0] <= init_F0 <= F0_range[1]):
+            raise ValueError("Initial period and force must lie within their bounds.")
         X_data, y_data = [], []
         history = {
             "eval_num":    [],
@@ -335,8 +185,8 @@ class BeadBayesianoptimiser:
             "distances":   [],
             "T_signal":    [],
             "F0":          [],
-            "fwd_coh":     [],
-            "rev_coh":     [],
+            "forward_R":     [],
+            "backward_R":     [],
             "asymmetry":   [],
             "phase":       [],
             "best_so_far": [],
@@ -352,6 +202,7 @@ class BeadBayesianoptimiser:
                 "kappa":        kappa,
                 "n_runs":       n_runs,
                 "timestamp":    datetime.datetime.now().isoformat(),
+                "protocol": self.protocol,
             },
         }
 
@@ -369,7 +220,7 @@ class BeadBayesianoptimiser:
                for cand in random_inits]
         )
 
-        total_sims = n_initial * 2 * n_runs
+        total_sims = n_initial * 3 * n_runs
         print(f"[Initial phase] Launching {n_initial} configs "
               f"({total_sims} simulations) across {num_cores} cores...")
 
@@ -383,7 +234,7 @@ class BeadBayesianoptimiser:
                          f, r, asym, "initial", max(y_data), None)
             print(f"  [{eval_count+1}/{n_initial}]  "
                   f"pos={[f'{p:.2f}' for p in pos]}  T={T:.4f}  F0={F0:.4f}  "
-                  f"→ Fwd={f:.4f}  Rev={r:.4f}  Asym={asym:.4f}")
+                  f"→ Fwd={f:.4f}  Bwd={r:.4f}  Asym={asym:.4f}")
             eval_count += 1
 
         self.save_history(history, output_dir)
@@ -412,7 +263,7 @@ class BeadBayesianoptimiser:
                   f"(acq={acq_val:.4f})")
             f, r, asym = self.evaluate_state(pos, T, F0, n_runs, total_time, num_cores)
             new_best   = max(f_best, asym)
-            print(f"  → Fwd={f:.4f}  Rev={r:.4f}  Asym={asym:.4f}  "
+            print(f"  → Fwd={f:.4f}  Bwd={r:.4f}  Asym={asym:.4f}  "
                   f"best={new_best:.4f}  {'↑ NEW BEST' if asym > f_best else ''}")
 
             X_data.append(next_cand.tolist()); y_data.append(asym)
@@ -441,6 +292,8 @@ class BeadBayesianoptimiser:
               f"  (+{len(y_data) - eval_count} warm-start)")
         print(f"{'='*66}")
 
+        history["best"] = {"positions": list(best_pos), "T_signal": best_T,
+                           "F0": best_F0, "score": best_asym}
         self.save_history(history, output_dir)
         self.plot_history(history, output_dir)
 
@@ -458,8 +311,8 @@ class BeadBayesianoptimiser:
         T_vals    = history["T_signal"]
         F0_vals   = history["F0"]
         asym_vals = history["asymmetry"]
-        fwd_vals  = history["fwd_coh"]
-        rev_vals  = history["rev_coh"]
+        fwd_vals  = history["forward_R"]
+        rev_vals  = history["backward_R"]
         best_vals = history["best_so_far"]
         phases    = history["phase"]
         n_initial = history["config"]["n_initial"]
@@ -486,7 +339,7 @@ class BeadBayesianoptimiser:
                    linewidth=0.9, label="BO starts")
         ax.axhline(0, color="grey", linestyle=":", linewidth=0.8)
         ax.set_xlabel("Evaluation number")
-        ax.set_ylabel(r"Asymmetry $\Delta C$")
+        ax.set_ylabel(r"Asymmetry $\Delta R$")
         ax.set_title("Optimisation progress", fontweight="bold")
         ax.legend(fontsize=8)
         ax.grid(True, alpha=0.3)
@@ -495,7 +348,7 @@ class BeadBayesianoptimiser:
         ax = axes[0, 1]
         sc = ax.scatter(T_vals, F0_vals, c=asym_vals, cmap="viridis",
                         s=25, alpha=0.85, zorder=3)
-        plt.colorbar(sc, ax=ax, label=r"Asymmetry $\Delta C$")
+        plt.colorbar(sc, ax=ax, label=r"Asymmetry $\Delta R$")
         if bo_mask.any():
             ax.scatter(np.array(T_vals)[bo_mask], np.array(F0_vals)[bo_mask],
                        s=55, facecolors="none", edgecolors="red",
@@ -544,12 +397,12 @@ class BeadBayesianoptimiser:
         # (2, 0) 
         ax = axes[2, 0]
         ax.plot(eval_nums, fwd_vals, "b-", linewidth=1.3, label="Forward")
-        ax.plot(eval_nums, rev_vals, "r-", linewidth=1.3, label="Reverse")
+        ax.plot(eval_nums, rev_vals, "r-", linewidth=1.3, label="Backward")
         ax.axvline(n_initial - 1, color="grey", linestyle="--",
                    linewidth=0.9, label="BO starts")
         ax.set_xlabel("Evaluation number")
-        ax.set_ylabel("Coherence")
-        ax.set_title("Coherence components", fontweight="bold")
+        ax.set_ylabel("Receiver phase consistency R")
+        ax.set_title("Receiver signal-locking components", fontweight="bold")
         ax.legend()
         ax.grid(True, alpha=0.3)
 
@@ -586,7 +439,7 @@ class BeadBayesianoptimiser:
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5), constrained_layout=True)
 
         im1 = ax1.imshow(mu,    origin="lower", extent=ext, aspect="auto", cmap="viridis")
-        fig.colorbar(im1, ax=ax1, label=r"GP mean $\hat{\mu}(\Delta C)$")
+        fig.colorbar(im1, ax=ax1, label=r"GP mean $\hat{\mu}(\Delta R)$")
         ax1.set_xlabel(r"$T_\mathrm{signal}$ (s)")
         ax1.set_ylabel(r"$F_0$")
         ax1.set_title("GP posterior mean\n(positions fixed at best)", fontweight="bold")
@@ -649,8 +502,12 @@ if __name__ == "__main__":
     # warm start and output name
     parser.add_argument("--warm_start",      type=str,   default=None,
                         metavar="JSON",
-                        help="Path to a previous metropolis_history.json or "
-                             "bo_history.json to seed the GP.")
+                        help="Path to a new-protocol objective_evaluations.jsonl or "
+                             "history JSON beside that audit, to seed the GP.")
+    parser.add_argument("--analysis-start", type=float, default=7.0,
+                        help="Settled analysis start after signal onset at t=5.")
+    parser.add_argument("--slip-hysteresis", type=float, default=np.pi / 4)
+    parser.add_argument("--hysteresis", type=float, default=None)
     parser.add_argument("--name",            type=str,   default=None)
     args = parser.parse_args()
 
@@ -660,7 +517,9 @@ if __name__ == "__main__":
         out_dir += f"_{args.name}"
 
     optimiser = BeadBayesianoptimiser(
-        executable=args.exe, template_input=args.template
+        executable=args.exe, template_input=args.template,
+        analysis_start=args.analysis_start, slip_hysteresis=args.slip_hysteresis,
+        hysteresis=args.hysteresis
     )
     optimiser.optimise(
         chain_length    = args.chain_length,
@@ -679,3 +538,4 @@ if __name__ == "__main__":
         warm_start_json = args.warm_start,
         output_dir      = out_dir,
     )
+
