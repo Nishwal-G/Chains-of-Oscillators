@@ -1,0 +1,351 @@
+"""Shared input handling and execution for the chain simulator.
+
+The catalogue below is the only mapping between Python names and C++ input
+columns. Search bounds belong in a run's JSON file, not in the physics code.
+Only chain geometry is exposed here; the existing C++ supports other geometries.
+"""
+
+from copy import deepcopy
+from dataclasses import dataclass
+from pathlib import Path
+import hashlib
+import json
+import subprocess
+import numpy as np
+from bead_analysis import BeadDataAnalyzer
+
+MIN_GAP = 3.1
+SCALARS = (
+    "num_beads amplitude base_distance bead_radius dt total_time viscosity "
+    "alpha kx beta ky temperature sampling_feedback sampling_write epsilon "
+    "velox ks fl0 veloy F0 T_signal default_lambda"
+).split()
+PARAMETERS = {
+    name: {"index": i, "label": name.replace("_", " ")}
+    for i, name in enumerate(SCALARS)
+}
+ARRAYS = ("distances", "lambdas", "kx_per_bead", "ky_per_bead", "signal_beads")
+# These are supported continuous search coordinates. Numerical settings and
+# unused C++ fields are intentionally excluded from the optimisation catalogue.
+SEARCHABLE = {
+    "amplitude",
+    "base_distance",
+    "viscosity",
+    "alpha",
+    "beta",
+    "temperature",
+    "epsilon",
+    "velox",
+    "veloy",
+    "F0",
+    "T_signal",
+    "default_lambda",
+    "kx",
+    "ky",
+    "lambdas",
+    "kx_per_bead",
+    "ky_per_bead",
+    "positions",
+}
+
+
+def json_value(value):
+    """Convert NumPy values and missing numerical measurements to strict JSON."""
+    if isinstance(value, dict):
+        return {str(k): json_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, np.ndarray)):
+        return [json_value(v) for v in value]
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, float) and not np.isfinite(value):
+        return None
+    return value
+
+
+def save_json(path, value):
+    Path(path).write_text(
+        json.dumps(json_value(value), indent=2, allow_nan=False) + "\n"
+    )
+
+
+def fingerprint(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+@dataclass
+class Configuration:
+    """Complete physical input, independent of the file it originally came from."""
+
+    values: dict
+
+    @classmethod
+    def read(cls, path):
+        p = [float(x) for x in Path(path).read_text().splitlines()[0].split()]
+        if len(p) < 22:
+            raise ValueError("Need at least 22 scalar input values.")
+        v = dict(zip(SCALARS, p[:22]))
+        n = int(v["num_beads"])
+        if n != v["num_beads"] or n < 2:
+            raise ValueError("A chain needs an integer bead count >= 2.")
+        cursor = 22
+        v["distances"] = p[cursor : cursor + n - 1]
+        cursor += n - 1
+        if len(v["distances"]) != n - 1:
+            raise ValueError("Missing chain distances.")
+        # Match the existing parser's optional-block defaults, then always
+        # write complete blocks so signal indices cannot become stiffnesses.
+        v["lambdas"] = p[cursor : cursor + n]
+        cursor += len(v["lambdas"])
+        v["lambdas"] += [v["default_lambda"]] * (n - len(v["lambdas"]))
+        for key, default in [("kx_per_bead", "kx"), ("ky_per_bead", "ky")]:
+            if len(p) - cursor >= n:
+                v[key] = p[cursor : cursor + n]
+                cursor += n
+            else:
+                v[key] = [v[default]] * n
+        tail = p[cursor:]
+        if tail:
+            count = int(tail[0])
+            if count != tail[0] or count < 0 or len(tail) != count + 1:
+                raise ValueError("Malformed signal bead block.")
+            v["signal_beads"] = tail[1:] or [0]
+        else:
+            v["signal_beads"] = [0]
+        result = cls(v)
+        result.validate()
+        return result
+
+    @property
+    def n(self):
+        return int(self.values["num_beads"])
+
+    @property
+    def length(self):
+        return float(sum(self.values["distances"]))
+
+    def get(self, name):
+        if name == "positions":
+            return np.cumsum(self.values["distances"])[:-1].tolist()
+        return deepcopy(self.values[name])
+
+    def updated(self, **overrides):
+        """Return a copy. Global kx/ky/lambda overrides update their full blocks.
+
+        Explicit per-bead overrides take priority over global ones. Position
+        overrides hold both endpoints and total length fixed.
+        """
+        result = Configuration(deepcopy(self.values))
+        for name, value in overrides.items():
+            if name == "positions":
+                result.values["distances"] = np.diff([0, *value, self.length]).tolist()
+            elif name in result.values:
+                result.values[name] = deepcopy(value)
+            else:
+                raise ValueError(f"Unknown parameter: {name}")
+        for scalar, array in [
+            ("kx", "kx_per_bead"),
+            ("ky", "ky_per_bead"),
+            ("default_lambda", "lambdas"),
+        ]:
+            if scalar in overrides and array not in overrides:
+                result.values[array] = [float(overrides[scalar])] * self.n
+        result.validate()
+        return result
+
+    def validate(self):
+        v = self.values
+        if not all(np.all(np.isfinite(np.asarray(x, dtype=float))) for x in v.values()):
+            raise ValueError("All input values must be finite.")
+        for name in ("num_beads", "sampling_feedback", "sampling_write"):
+            if v[name] < 1 or v[name] != int(v[name]):
+                raise ValueError(f"{name} must be a positive integer.")
+        if self.n < 2:
+            raise ValueError("Need at least two beads.")
+        for name in (
+            "amplitude",
+            "base_distance",
+            "bead_radius",
+            "dt",
+            "total_time",
+            "viscosity",
+            "alpha",
+            "beta",
+            "epsilon",
+            "T_signal",
+            "kx",
+            "ky",
+        ):
+            if v[name] <= 0:
+                raise ValueError(f"{name} must be positive.")
+        if v["temperature"] < 0 or v["F0"] < 0:
+            raise ValueError("Temperature and signal amplitude cannot be negative.")
+        for key in ("lambdas", "kx_per_bead", "ky_per_bead"):
+            if len(v[key]) != self.n:
+                raise ValueError(f"{key} needs {self.n} values.")
+        if min(v["kx_per_bead"] + v["ky_per_bead"]) <= 0:
+            raise ValueError("Trap coefficients must be positive.")
+        gaps = np.asarray(v["distances"])
+        if len(gaps) != self.n - 1 or np.any(gaps < MIN_GAP - 1e-12):
+            raise ValueError(f"Reference gaps must be >= {MIN_GAP}.")
+        if np.any(gaps <= 2 * v["bead_radius"]):
+            raise ValueError("Reference gaps must exceed bead diameter.")
+        # Negative effective trap strength would not be a confining trap.
+        i = np.arange(self.n) - (self.n - 1) / 2
+        if np.any(1 + np.asarray(v["lambdas"]) * (i * i - 0.25) <= 0):
+            raise ValueError("Lambda profile gives nonpositive trap strength.")
+        if any(b != int(b) or not 0 <= b < self.n for b in v["signal_beads"]):
+            raise ValueError("Signal bead indices are invalid.")
+
+    def write(self, path):
+        self.validate()
+        p = [self.values[k] for k in SCALARS]
+        for key in ARRAYS[:-1]:
+            p.extend(self.values[key])
+        beads = self.values["signal_beads"]
+        p += [len(beads), *beads]
+        Path(path).write_text(" ".join(format(float(x), ".17g") for x in p) + "\n")
+
+
+def load_configuration(path):
+    """Accept a template, a saved best.json, or a new optimisation history."""
+    path = Path(path)
+    if path.suffix == ".input":
+        return Configuration.read(path)
+    data = json.loads(path.read_text())
+    data = data.get("best", data)
+    if "configuration" not in data:
+        raise ValueError(
+            "JSON must contain a complete configuration; old best-only histories need their original template."
+        )
+    config = Configuration(data["configuration"])
+    config.validate()
+    return config
+
+
+class ParameterSpace:
+    """Flatten named scalar/array variables for either optimisation algorithm."""
+
+    def __init__(self, base, specification):
+        self.base, self.specification = base, deepcopy(specification)
+        self.slices, self.labels = {}, []
+        lower, upper, steps, initial = [], [], [], []
+        if not specification:
+            raise ValueError("Select at least one free parameter.")
+        for a, b in [
+            ("kx", "kx_per_bead"),
+            ("ky", "ky_per_bead"),
+            ("default_lambda", "lambdas"),
+        ]:
+            if a in specification and b in specification:
+                raise ValueError(f"Choose {a} or {b}, not both.")
+        for name, settings in specification.items():
+            if name not in SEARCHABLE:
+                raise ValueError(
+                    f"Unsupported search parameter {name}; choose from {sorted(SEARCHABLE)}"
+                )
+            values = np.atleast_1d(settings.get("initial", base.get(name))).astype(
+                float
+            )
+            size = np.size(base.get(name))
+            if len(values) != size or size == 0:
+                raise ValueError(f"Wrong initial dimension for {name}.")
+            bounds = settings.get(
+                "bounds", (0, base.length) if name == "positions" else None
+            )
+            if bounds is None or len(bounds) != 2:
+                raise ValueError(f"Supply [lower, upper] bounds for {name}.")
+            lo, hi = [np.broadcast_to(x, (size,)).astype(float) for x in bounds]
+            step = np.broadcast_to(settings.get("step", (hi - lo) * 0.05), (size,))
+            if (
+                not np.all(np.isfinite([lo, hi, step, values]))
+                or np.any(hi <= lo)
+                or np.any(step < 0)
+            ):
+                raise ValueError(f"Invalid bounds/steps for {name}.")
+            self.slices[name] = slice(len(lower), len(lower) + size)
+            self.labels.extend(
+                [name] if size == 1 else [f"{name}[{i}]" for i in range(size)]
+            )
+            lower.extend(lo)
+            upper.extend(hi)
+            steps.extend(step)
+            initial.extend(values)
+        self.lo, self.hi, self.steps, self.initial = map(
+            np.asarray, (lower, upper, steps, initial)
+        )
+        self.configuration(self.initial)
+
+    def configuration(self, vector):
+        x = np.asarray(vector)
+        if (
+            x.shape != self.lo.shape
+            or not np.all(np.isfinite(x))
+            or np.any(x < self.lo)
+            or np.any(x > self.hi)
+        ):
+            raise ValueError("Candidate outside parameter bounds.")
+        overrides = {}
+        for name, section in self.slices.items():
+            values = x[section]
+            overrides[name] = (
+                values.tolist()
+                if name in ARRAYS or name == "positions"
+                else float(values[0])
+            )
+        return self.base.updated(**overrides)
+
+    def sample(self, rng, count=1):
+        """Sample geometry on the fixed-length gap simplex; reject other invalid inputs."""
+        result = []
+        for _ in range(max(1000, 100 * count)):
+            x = rng.uniform(self.lo, self.hi)
+            if "positions" in self.slices:
+                excess = self.base.length - (self.base.n - 1) * MIN_GAP
+                gaps = MIN_GAP + rng.dirichlet(np.ones(self.base.n - 1)) * max(
+                    0, excess
+                )
+                x[self.slices["positions"]] = np.cumsum(gaps)[:-1]
+            try:
+                self.configuration(x)
+            except ValueError:
+                continue
+            result.append(x)
+            if len(result) == count:
+                return np.asarray(result)
+        raise ValueError(
+            "Could not sample valid configurations; check bounds and geometry."
+        )
+
+    def normalise(self, x):
+        return (np.asarray(x) - self.lo) / (self.hi - self.lo)
+
+
+def run_simulation(config, executable, folder):
+    """Run in a fresh folder. Failure leaves input, log and partial output intact."""
+    folder = Path(folder).resolve()
+    folder.mkdir(parents=True, exist_ok=False)
+    executable = Path(executable).resolve()
+    if not executable.is_file():
+        raise FileNotFoundError(executable)
+    config.write(folder / "run.input")
+    with (folder / "simulation.log").open("w") as log:
+        completed = subprocess.run(
+            [str(executable), "-C", "-R", str(folder / "run.input")],
+            cwd=folder,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+        )
+    files = list((folder / "run").glob("*.dat"))
+    if completed.returncode or len(files) != 1:
+        raise RuntimeError(f"Simulation failed; inspect {folder}/simulation.log")
+    reader = BeadDataAnalyzer()
+    reader.read_data_file(str(files[0]))
+    spacing = config.values["dt"] * config.values["sampling_write"]
+    if (
+        reader.num_beads != config.n
+        or not np.all(np.isfinite(reader.positions))
+        or not np.allclose(np.diff(reader.time_series), spacing, rtol=1e-4, atol=1e-8)
+        or abs(reader.time_series[-1] - config.values["total_time"]) > 2 * spacing
+    ):
+        raise RuntimeError(f"Invalid trajectory dimensions/timestamps: {files[0]}")
+    return reader
