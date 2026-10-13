@@ -186,9 +186,9 @@ void Simulation::run() {
         }
 
         if (step_count % config_.sampling_write == 0) {
-            saveData(out_dat, frame);
+            saveData(out_dat, frame, time);
             saveTraps(out_trap, frame);
-            saveForces(out_force, frame);
+            saveForces(out_force, frame, time);
         }
 
         step(time);
