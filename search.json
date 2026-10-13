@@ -1,0 +1,6 @@
+{
+  "positions": {"step": 0.5},
+  "T_signal": {"bounds": [0.01, 2.0], "step": 0.02},
+  "F0": {"bounds": [0.5, 10.0], "step": 0.2},
+  "alpha": {"bounds": [0.5, 2.0], "step": 0.05}
+}
