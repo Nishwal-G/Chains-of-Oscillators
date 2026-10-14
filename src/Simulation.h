@@ -89,7 +89,7 @@ private:
     */
 
     // Writes the frame, constructed timestamp, and bead coordinates.
-    void saveData(std::ostream& out, int frame);
+    void saveData(std::ostream& out, int frame, double time);
 
     // Writes the frame and actual trap-centre coordinates:
     // reference_pos + trap_offsets.
@@ -98,7 +98,7 @@ private:
 
     // Writes the frame, constructed timestamp, and current force buffer.
     // This method records stored forces; it does not recalculate them.
-    void saveForces(std::ostream& out, int frame);
+    void saveForces(std::ostream& out, int frame, double time);
 
     /*
     Returns the input filename's stem for output naming.
