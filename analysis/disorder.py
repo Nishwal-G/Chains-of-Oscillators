@@ -10,7 +10,8 @@ Example (from repository root):
 
 w is a maximum fractional perturbation, NOT a standard deviation. Each pattern
 u_i ~ Uniform[-1,1] is fixed in time and shared across w: k_i=k_i0*(1+w*u_i).
-All baseline geometry, lambda profiles, signal settings and temperature remain
+All baseline geometry, wall settings, individual exponents/excursions and angles,
+lambda profiles, signal settings and temperature remain
 unchanged unless explicitly overridden. Disorder does not preserve the sample
 mean stiffness. A Python seed reproduces disorder, not C++ thermal noise.
 """

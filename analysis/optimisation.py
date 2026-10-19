@@ -31,6 +31,8 @@ from bead_analysis import measure_experiments, directional_score
 OBJECTIVE = "matched_endpoint_R_difference_v1"
 
 
+# Per-bead arrays and indexed search coordinates are resolved by simulation.py.
+# The evaluator preserves those values and wall settings in all matched runs.
 class Evaluator:
     """Independent matched triples, reused by optimisation and characterisation."""
 

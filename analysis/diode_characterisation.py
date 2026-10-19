@@ -949,7 +949,7 @@ def write_trajectory_summary(
 # Importing this module does not run an experiment.
 import sys
 import shutil
-from simulation import load_configuration, run_simulation, save_json, fingerprint
+from simulation import load_configuration, run_simulation, save_json, fingerprint, reject_conflicts, SEARCHABLE
 from optimisation import Evaluator
 from bead_analysis import frequency_spectra, classify_locking
 
@@ -961,6 +961,9 @@ def override_axis(config, name, value):
     rejected, never clipped. 'asymmetry' interpolates from uniform to supplied
     geometry and preserves length. d_grad/g_factor preserve mean spacing.
     """
+    root = name.split("[")[0]
+    if root in ("wall_height", "shear_x", "shear_y") and config.values["mobility"] != "blake":
+        raise ValueError(f"{root} requires Blake mode")
     n = config.n - 1
     if name == "asymmetry":
         mean = config.length / n
@@ -981,13 +984,11 @@ def override_axis(config, name, value):
         )
     # Individual vector entries are addressed as lambdas[2], kx_per_bead[0], ...
     if "[" in name and name.endswith("]"):
-        key, index = name[:-1].split("[")
-        values = config.get(key)
-        values[int(index)] = float(value)
-        return config.updated(**{key: values})
+        if root not in SEARCHABLE:
+            raise ValueError(f"Unsupported sweep parameter: {name}")
+        return config.updated(**{name: float(value)})
     if name not in config.values or np.ndim(config.values[name]) != 0:
         raise ValueError(f"{name} is not a scalar axis; use e.g. kx_per_bead[0].")
-    from simulation import SEARCHABLE
 
     if name not in SEARCHABLE:
         raise ValueError(f"{name} is not an exposed physical sweep parameter.")
@@ -1210,6 +1211,9 @@ def response_class(record, n, args):
 def diagram(config, args, output):
     x_name, x_lo, x_hi = args.x
     y_name, y_lo, y_hi = args.y if args.y else ("fixed", 0, 0)
+    # Shared rejection includes newly added global/per-bead potential conflicts.
+    if args.y:
+        reject_conflicts([x_name, y_name])
     if x_name == y_name:
         raise ValueError("Choose two distinct axes.")
     # These combinations otherwise overwrite the same geometry or coefficients.

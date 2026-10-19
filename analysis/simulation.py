@@ -10,11 +10,34 @@ from dataclasses import dataclass
 from pathlib import Path
 import hashlib
 import json
+import re
 import subprocess
 import numpy as np
 from bead_analysis import BeadDataAnalyzer
 
 MIN_GAP = 3.1
+# One catalogue defines scalar defaults, broadcast overrides and search conflicts.
+PER_BEAD_DEFAULTS = {
+    "lambdas": "default_lambda", "kx_per_bead": "kx", "ky_per_bead": "ky",
+    "alpha_per_bead": "alpha", "beta_per_bead": "beta",
+    "amplitude_per_bead": "amplitude", "epsilon_per_bead": "epsilon",
+}
+EXTENSION_SCALARS = ("wall_height", "shear_x", "shear_y")
+
+def indexed_name(name):
+    match = re.fullmatch(r"([A-Za-z_][A-Za-z_0-9]*)\[(\d+)\]", name)
+    return (match.group(1), int(match.group(2))) if match else (name, None)
+
+def reject_conflicts(names):
+    """Reject global/array/index selections that overwrite the same property."""
+    names = list(names)
+    for i, first in enumerate(names):
+        a, ai = indexed_name(first)
+        for second in names[i+1:]:
+            b, bi = indexed_name(second)
+            if (a == b and (ai is None or bi is None or ai == bi)) or \
+               PER_BEAD_DEFAULTS.get(a) == b or PER_BEAD_DEFAULTS.get(b) == a:
+                raise ValueError(f"Conflicting parameters: {first}, {second}")
 SCALARS = (
     "num_beads amplitude base_distance bead_radius dt total_time viscosity "
     "alpha kx beta ky temperature sampling_feedback sampling_write epsilon "
@@ -24,7 +47,7 @@ PARAMETERS = {
     name: {"index": i, "label": name.replace("_", " ")}
     for i, name in enumerate(SCALARS)
 }
-ARRAYS = ("distances", "lambdas", "kx_per_bead", "ky_per_bead", "signal_beads", "angles_deg")
+ARRAYS = ("distances", "lambdas", "kx_per_bead", "ky_per_bead", "signal_beads", "angles_deg", "alpha_per_bead", "beta_per_bead", "amplitude_per_bead", "epsilon_per_bead")
 # These are supported continuous search coordinates. Numerical settings and
 # unused C++ fields are intentionally excluded from the optimisation catalogue.
 SEARCHABLE = {
@@ -46,7 +69,8 @@ SEARCHABLE = {
     "kx_per_bead",
     "ky_per_bead",
     "positions",
-    "angles_deg",
+    "angles_deg", "alpha_per_bead", "beta_per_bead", "amplitude_per_bead",
+    "epsilon_per_bead", "bead_radius", "wall_height", "shear_x", "shear_y",
 }
 
 
@@ -81,7 +105,14 @@ class Configuration:
 
     def __post_init__(self):
         # Old templates and saved best.json files retain horizontal strokes.
-        self.values.setdefault("angles_deg", [0.0] * int(self.values["num_beads"]))
+        n = int(self.values["num_beads"])
+        self.values.setdefault("angles_deg", [0.0] * n)
+        for array, scalar in PER_BEAD_DEFAULTS.items():
+            self.values.setdefault(array, [self.values[scalar]] * n)
+        self.values.setdefault("mobility", "rotne_prager")
+        self.values.setdefault("wall_height", 6.0)
+        self.values.setdefault("shear_x", 0.0)
+        self.values.setdefault("shear_y", 0.0)
 
     @classmethod
     def read(cls, path):
@@ -116,16 +147,24 @@ class Configuration:
             v["signal_beads"] = tail[1:] or [0]
         else:
             v["signal_beads"] = [0]
-        # Labelled extension leaves the historical first-line layout intact.
-        seen_angles = False
+        # Labelled values override legacy blocks; no positional layout changes.
+        seen = set()
+        allowed = set(PER_BEAD_DEFAULTS) | {"angles_deg", "mobility", *EXTENSION_SCALARS}
         for line in Path(path).read_text().splitlines()[1:]:
             fields = line.split("#", 1)[0].split()
-            if not fields:
-                continue
-            if fields[0] != "angles_deg" or seen_angles:
-                raise ValueError("Expected one optional angles_deg line.")
-            seen_angles = True
-            v["angles_deg"] = [float(x) for x in fields[1:]]
+            if not fields: continue
+            key = fields[0]
+            if key not in allowed or key in seen:
+                raise ValueError(f"Unknown/duplicate extension: {key}")
+            seen.add(key)
+            if key == "mobility":
+                if len(fields) != 2: raise ValueError("mobility needs one name")
+                v[key] = fields[1]
+            elif key in EXTENSION_SCALARS:
+                if len(fields) != 2: raise ValueError(f"{key} needs one value")
+                v[key] = float(fields[1])
+            else:
+                v[key] = [float(x) for x in fields[1:]]
         result = cls(v)
         result.validate()
         return result
@@ -139,6 +178,11 @@ class Configuration:
         return float(sum(self.values["distances"]))
 
     def get(self, name):
+        root, index = indexed_name(name)
+        if index is not None:
+            if root not in ARRAYS or root == "signal_beads" or not 0 <= index < len(self.values[root]):
+                raise ValueError(f"Invalid indexed parameter: {name}")
+            return deepcopy(self.values[root][index])
         if name == "positions":
             return np.cumsum(self.values["distances"])[:-1].tolist()
         return deepcopy(self.values[name])
@@ -150,26 +194,28 @@ class Configuration:
         overrides hold both endpoints and total length fixed.
         """
         result = Configuration(deepcopy(self.values))
+        # Broadcast global settings first, then explicit arrays/indices take priority.
+        for array, scalar in PER_BEAD_DEFAULTS.items():
+            if scalar in overrides:
+                result.values[array] = [float(overrides[scalar])] * self.n
+        reject_conflicts([key for key in overrides if indexed_name(key)[0] in ARRAYS])
         for name, value in overrides.items():
-            if name == "positions":
+            root, index = indexed_name(name)
+            if index is not None:
+                result.get(name)  # validate index before assignment
+                result.values[root][index] = float(value)
+            elif name == "positions":
                 result.values["distances"] = np.diff([0, *value, self.length]).tolist()
             elif name in result.values:
                 result.values[name] = deepcopy(value)
             else:
                 raise ValueError(f"Unknown parameter: {name}")
-        for scalar, array in [
-            ("kx", "kx_per_bead"),
-            ("ky", "ky_per_bead"),
-            ("default_lambda", "lambdas"),
-        ]:
-            if scalar in overrides and array not in overrides:
-                result.values[array] = [float(overrides[scalar])] * self.n
         result.validate()
         return result
 
     def validate(self):
         v = self.values
-        if not all(np.all(np.isfinite(np.asarray(x, dtype=float))) for x in v.values()):
+        if not all(np.all(np.isfinite(np.asarray(x, dtype=float))) for key, x in v.items() if key != "mobility"):
             raise ValueError("All input values must be finite.")
         for name in ("num_beads", "sampling_feedback", "sampling_write"):
             if v[name] < 1 or v[name] != int(v[name]):
@@ -194,11 +240,26 @@ class Configuration:
                 raise ValueError(f"{name} must be positive.")
         if v["temperature"] < 0 or v["F0"] < 0:
             raise ValueError("Temperature and signal amplitude cannot be negative.")
-        for key in ("lambdas", "kx_per_bead", "ky_per_bead", "angles_deg"):
+        for key in (*PER_BEAD_DEFAULTS, "angles_deg"):
             if len(v[key]) != self.n:
                 raise ValueError(f"{key} needs {self.n} values.")
         if min(v["kx_per_bead"] + v["ky_per_bead"]) <= 0:
             raise ValueError("Trap coefficients must be positive.")
+        for key in PER_BEAD_DEFAULTS:
+            if key != "lambdas" and np.any(np.asarray(v[key]) <= 0):
+                raise ValueError(f"{key} must be positive.")
+        if v["mobility"] not in ("oseen", "rotne_prager", "blake"):
+            raise ValueError("mobility must be oseen, rotne_prager or blake")
+        if v["wall_height"] <= 0: raise ValueError("wall_height must be positive")
+        if v["mobility"] == "blake":
+            if v["wall_height"] < 3*v["bead_radius"]:
+                raise ValueError("Blake requires wall_height >= 3 radii")
+            if v["velox"] != 0 or v["veloy"] != 0:
+                raise ValueError("Use shear_x/shear_y for wall-compatible flow")
+            if np.any(np.asarray(v["distances"]) < 4*v["bead_radius"]):
+                raise ValueError("Blake reference gaps must be >= 4 radii; instantaneous gaps are also checked")
+        elif v["shear_x"] != 0 or v["shear_y"] != 0:
+            raise ValueError("shear_x/shear_y require Blake mobility")
         gaps = np.asarray(v["distances"])
         if len(gaps) != self.n - 1 or np.any(gaps < MIN_GAP - 1e-12):
             raise ValueError(f"Reference gaps must be >= {MIN_GAP}.")
@@ -219,11 +280,13 @@ class Configuration:
             p.extend(self.values[key])
         beads = self.values["signal_beads"]
         p += [len(beads), *beads]
-        Path(path).write_text(
-            " ".join(format(float(x), ".17g") for x in p) + "\nangles_deg "
-            + " ".join(format(float(x), ".17g") for x in self.values["angles_deg"])
-            + "\n"
-        )
+        lines = [" ".join(format(float(x), ".17g") for x in p)]
+        lines.append("mobility " + self.values["mobility"])
+        for key in (*EXTENSION_SCALARS, "angles_deg", *PER_BEAD_DEFAULTS):
+            values = np.atleast_1d(self.values[key])
+            lines.append(key + " " + " ".join(format(float(x), ".17g") for x in values))
+        Path(path).write_text("\n".join(lines) + "\n")
+
 
 
 def load_configuration(path):
@@ -251,18 +314,15 @@ class ParameterSpace:
         lower, upper, steps, initial = [], [], [], []
         if not specification:
             raise ValueError("Select at least one free parameter.")
-        for a, b in [
-            ("kx", "kx_per_bead"),
-            ("ky", "ky_per_bead"),
-            ("default_lambda", "lambdas"),
-        ]:
-            if a in specification and b in specification:
-                raise ValueError(f"Choose {a} or {b}, not both.")
+        reject_conflicts(specification)
         for name, settings in specification.items():
-            if name not in SEARCHABLE:
-                raise ValueError(
-                    f"Unsupported search parameter {name}; choose from {sorted(SEARCHABLE)}"
-                )
+            root, index = indexed_name(name)
+            if root not in SEARCHABLE or (index is not None and root not in PER_BEAD_DEFAULTS and root != "angles_deg"):
+                raise ValueError(f"Unsupported search parameter: {name}")
+            if root in EXTENSION_SCALARS and base.values["mobility"] != "blake":
+                raise ValueError(f"{root} only affects Blake mode")
+            if root in ("velox", "veloy") and base.values["mobility"] == "blake":
+                raise ValueError("Search shear_x/shear_y in Blake mode")
             values = np.atleast_1d(settings.get("initial", base.get(name))).astype(
                 float
             )
@@ -350,7 +410,7 @@ def run_simulation(config, executable, folder):
     config.write(folder / "run.input")
     with (folder / "simulation.log").open("w") as log:
         completed = subprocess.run(
-            [str(executable), "-C", "-R", str(folder / "run.input")],
+            [str(executable), "-C", {"oseen": "-O", "rotne_prager": "-R", "blake": "-B"}[config.values["mobility"]], str(folder / "run.input")],
             cwd=folder,
             stdout=log,
             stderr=subprocess.STDOUT,
@@ -363,6 +423,15 @@ def run_simulation(config, executable, folder):
     # Detect a stale executable that would silently ignore the new input line.
     if not np.allclose(reader.angles_deg, config.values["angles_deg"], rtol=0, atol=1e-10):
         raise RuntimeError("Trajectory axes disagree with input; rebuild src/rowers.")
+    # A sidecar confirms that the executable understood the new model options.
+    metadata = files[0].with_suffix(".hydro")
+    if not metadata.exists():
+        raise RuntimeError("Missing mobility metadata; rebuild the updated src/rowers")
+    hydro = dict(line.split() for line in metadata.read_text().splitlines())
+    if hydro.get("mobility") != config.values["mobility"] or any(
+        not np.isclose(float(hydro[k]), config.values[k], rtol=1e-12, atol=1e-12)
+        for k in EXTENSION_SCALARS):
+        raise RuntimeError("Simulator mobility settings disagree with configuration")
     spacing = config.values["dt"] * config.values["sampling_write"]
     if (
         reader.num_beads != config.n
