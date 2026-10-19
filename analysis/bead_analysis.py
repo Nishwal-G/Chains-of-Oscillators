@@ -3,6 +3,7 @@
 
 import numpy as np
 import re
+from pathlib import Path
 
 
 class BeadDataAnalyzer:
@@ -10,6 +11,7 @@ class BeadDataAnalyzer:
         """Initialize the analyzer with default parameters."""
         self.time_series = None
         self.positions = None
+        self.angles_deg = None
         self.bead_positions = {}
         self.num_beads = 0
         self.dt = None
@@ -57,6 +59,30 @@ class BeadDataAnalyzer:
 
             self.positions[:, i, 0] = data[:, x_col]
             self.positions[:, i, 1] = data[:, y_col]
+
+        # New runs write a same-stem .axes sidecar. Missing metadata means a
+        # legacy horizontal trajectory. Keep .positions in laboratory space.
+        sidecar = Path(filepath).with_suffix(".axes")
+        self.angles_deg = np.zeros(self.num_beads)
+        if sidecar.exists():
+            axes = np.loadtxt(sidecar, ndmin=2)
+            if axes.shape != (self.num_beads, 3) or not np.all(np.isfinite(axes)):
+                raise ValueError("Invalid .axes metadata; expected N rows of angle, X, Y.")
+            self.angles_deg = axes[:, 0]
+
+    @property
+    def analysis_positions(self):
+        """Local longitudinal/transverse coordinates for ALL phase/spectrum paths.
+
+        Rotate absolute positions: at zero angle these are exactly the previous
+        x/y coordinates. Subtracting their means gives the same displacements
+        as projecting r-R and subtracting its mean. Lab data remain available
+        in .positions for physical trajectory plots and geometry checks.
+        """
+        theta = np.deg2rad(self.angles_deg)
+        c, s = np.cos(theta), np.sin(theta)
+        x, y = self.positions[..., 0], self.positions[..., 1]
+        return np.stack((x*c + y*s, -x*s + y*c), axis=-1)
 
 
 class MultiBeadCoherenceAnalyzer:
@@ -608,7 +634,7 @@ def frequency_spectra(reader, start=5.0, frequency_range=(0.1, 20.0), nperseg=40
     if not np.allclose(spacing, spacing[0], rtol=1e-4, atol=1e-8):
         raise ValueError("Welch spectra require uniformly sampled data.")
     frequencies, power = welch(
-        reader.positions[mask, :, 0],
+        reader.analysis_positions[mask, :, 0],
         fs=1 / spacing[0],
         axis=0,
         nperseg=min(nperseg, len(times)),
@@ -637,7 +663,7 @@ def measure_experiments(
     """
     analysers = {
         key: MultiBeadCoherenceAnalyzer(
-            r.time_series, r.positions, hysteresis=hysteresis
+            r.time_series, r.analysis_positions, hysteresis=hysteresis
         )
         for key, r in readers.items()
     }

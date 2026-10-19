@@ -24,7 +24,7 @@ PARAMETERS = {
     name: {"index": i, "label": name.replace("_", " ")}
     for i, name in enumerate(SCALARS)
 }
-ARRAYS = ("distances", "lambdas", "kx_per_bead", "ky_per_bead", "signal_beads")
+ARRAYS = ("distances", "lambdas", "kx_per_bead", "ky_per_bead", "signal_beads", "angles_deg")
 # These are supported continuous search coordinates. Numerical settings and
 # unused C++ fields are intentionally excluded from the optimisation catalogue.
 SEARCHABLE = {
@@ -46,6 +46,7 @@ SEARCHABLE = {
     "kx_per_bead",
     "ky_per_bead",
     "positions",
+    "angles_deg",
 }
 
 
@@ -77,6 +78,10 @@ class Configuration:
     """Complete physical input, independent of the file it originally came from."""
 
     values: dict
+
+    def __post_init__(self):
+        # Old templates and saved best.json files retain horizontal strokes.
+        self.values.setdefault("angles_deg", [0.0] * int(self.values["num_beads"]))
 
     @classmethod
     def read(cls, path):
@@ -111,6 +116,16 @@ class Configuration:
             v["signal_beads"] = tail[1:] or [0]
         else:
             v["signal_beads"] = [0]
+        # Labelled extension leaves the historical first-line layout intact.
+        seen_angles = False
+        for line in Path(path).read_text().splitlines()[1:]:
+            fields = line.split("#", 1)[0].split()
+            if not fields:
+                continue
+            if fields[0] != "angles_deg" or seen_angles:
+                raise ValueError("Expected one optional angles_deg line.")
+            seen_angles = True
+            v["angles_deg"] = [float(x) for x in fields[1:]]
         result = cls(v)
         result.validate()
         return result
@@ -179,7 +194,7 @@ class Configuration:
                 raise ValueError(f"{name} must be positive.")
         if v["temperature"] < 0 or v["F0"] < 0:
             raise ValueError("Temperature and signal amplitude cannot be negative.")
-        for key in ("lambdas", "kx_per_bead", "ky_per_bead"):
+        for key in ("lambdas", "kx_per_bead", "ky_per_bead", "angles_deg"):
             if len(v[key]) != self.n:
                 raise ValueError(f"{key} needs {self.n} values.")
         if min(v["kx_per_bead"] + v["ky_per_bead"]) <= 0:
@@ -199,11 +214,16 @@ class Configuration:
     def write(self, path):
         self.validate()
         p = [self.values[k] for k in SCALARS]
-        for key in ARRAYS[:-1]:
+        # Angles are deliberately not inserted into the positional blocks.
+        for key in ("distances", "lambdas", "kx_per_bead", "ky_per_bead"):
             p.extend(self.values[key])
         beads = self.values["signal_beads"]
         p += [len(beads), *beads]
-        Path(path).write_text(" ".join(format(float(x), ".17g") for x in p) + "\n")
+        Path(path).write_text(
+            " ".join(format(float(x), ".17g") for x in p) + "\nangles_deg "
+            + " ".join(format(float(x), ".17g") for x in self.values["angles_deg"])
+            + "\n"
+        )
 
 
 def load_configuration(path):
@@ -340,6 +360,9 @@ def run_simulation(config, executable, folder):
         raise RuntimeError(f"Simulation failed; inspect {folder}/simulation.log")
     reader = BeadDataAnalyzer()
     reader.read_data_file(str(files[0]))
+    # Detect a stale executable that would silently ignore the new input line.
+    if not np.allclose(reader.angles_deg, config.values["angles_deg"], rtol=0, atol=1e-10):
+        raise RuntimeError("Trajectory axes disagree with input; rebuild src/rowers.")
     spacing = config.values["dt"] * config.values["sampling_write"]
     if (
         reader.num_beads != config.n

@@ -64,11 +64,11 @@ def trajectory_main(argv):
         help="Also display the figures in plot windows.",
     )
     parser.add_argument(
-        "--reference-x",
+        "--reference-x", "--reference-longitudinal",
         type=float,
         nargs="+",
         default=None,
-        help="Fixed reference x coordinates, one per bead.",
+        help="Fixed local longitudinal reference coordinates, one per bead (x for zero angles).",
     )
     parser.add_argument(
         "--hysteresis",
@@ -151,7 +151,9 @@ def trajectory_main(argv):
         parser.error(str(error))
 
     t = data.time_series
-    positions = data.positions
+    # All crossing, motion and locking plots use the bead-local coordinates.
+    # The reader retains laboratory x/y in data.positions.
+    positions = data.analysis_positions
     n_beads = data.num_beads
 
     if not np.all(np.isfinite(positions)):
@@ -309,9 +311,9 @@ def trajectory_main(argv):
     zoom_mask = t >= t[-1] - args.zoom
 
     centre_label = (
-        "x − reference x"
+        "Longitudinal coordinate − reference"
         if args.reference_x is not None
-        else "x − settled mean(x)" if signal_enabled else "x − mean(x)"
+        else "Longitudinal displacement from settled mean" if signal_enabled else "Longitudinal displacement from mean"
     )
 
     plot_trajectory_motion(
@@ -804,7 +806,9 @@ def write_trajectory_summary(
         "beads": [
             {
                 "index": i,
+                # Keep the legacy JSON key, but document its local-coordinate meaning.
                 "crossing_level_x": float(levels[i]),
+                "crossing_coordinate": "longitudinal",
                 "hysteresis_half_width": float(widths[i]),
                 "positive_crossings": len(crossing_times[i]),
                 "mean_period": json_number(periods[i]),
@@ -1070,7 +1074,7 @@ def mechanism(config, args, output):
             str(next((folder / "replicate_0" / direction / "run").glob("*.dat")))
         )
         analyser = MultiBeadCoherenceAnalyzer(
-            reader.time_series, reader.positions, hysteresis=args.hysteresis
+            reader.time_series, reader.analysis_positions, hysteresis=args.hysteresis
         )
         for bead in range(config.n):
             times, delta = analyser.get_signal_phase_difference(
@@ -1155,7 +1159,7 @@ def legacy_measurement(config, args, folder):
             reader = run_simulation(c, args.exe, folder / f"{direction}_{repeat}")
             mask = reader.time_series >= 5.0
             analyser = MultiBeadCoherenceAnalyzer(
-                reader.time_series[mask], reader.positions[mask]
+                reader.time_series[mask], reader.analysis_positions[mask]
             )
             score = float(analyser.coherence_windowed_real_sum(ref_bead=0)[-1])
             if not np.isfinite(score):
