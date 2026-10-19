@@ -1,0 +1,23 @@
+{
+  "kx_per_bead": {
+    "bounds": [
+      8,
+      14
+    ],
+    "step": 0.2
+  },
+  "alpha_per_bead[0]": {
+    "bounds": [
+      0.5,
+      1.0
+    ],
+    "step": 0.02
+  },
+  "wall_height": {
+    "bounds": [
+      5,
+      10
+    ],
+    "step": 0.2
+  }
+}
