@@ -1,0 +1,477 @@
+HOW TO USE search.json
+For the wall + independent-per-bead version of the rowers code
+
+1. THE BASIC RULE
+
+Your input template (or saved best.json) defines the starting configuration.
+search.json lists the parameters the optimiser is allowed to change.
+Parameters omitted from the search retain their configured values, except that
+a selected global parameter broadcasts its value to every corresponding bead.
+
+This text file is documentation. Pass search.json, NOT search_help.txt, to
+--search. Run commands from the repository root.
+
+For example, this is a complete search.json:
+
+{
+  "kx_per_bead": {"bounds": [8, 14], "step": 0.2}
+}
+
+With six beads this searches SIX independent coefficients:
+kx_0, kx_1, kx_2, kx_3, kx_4, kx_5.
+The same bounds apply to each coefficient, but their values are NOT tied.
+All other properties stay at their configured values.
+
+2. SHARED VALUE, WHOLE ARRAY, OR INDIVIDUAL BEADS
+
+"kx"                 One common coefficient applied to ALL beads.
+"kx_per_bead"        N independently variable coefficients.
+"kx_per_bead[0]"     Only the first bead's coefficient.
+"kx_per_bead[1]"     Only the second bead's coefficient.
+
+Indices start at zero. Six beads have indices 0 through 5.
+Select several distinct indices to vary a subset. For example:
+
+{
+  "kx_per_bead[0]": {"bounds": [8, 14], "step": 0.2},
+  "kx_per_bead[1]": {"bounds": [8, 14], "step": 0.2}
+}
+
+Here the first TWO beads vary independently; the other four retain their values.
+The same global/array/index convention applies to the potential parameters below.
+
+3. THE THREE SETTINGS INSIDE EACH ENTRY
+
+bounds: [lower, upper]
+    Allowed interval. Upper must be strictly greater than lower.
+    Required for every entry except positions, which defaults to [0, chain_length].
+    For an array, scalar limits apply separately to every entry.
+    Constraints on valid configurations still apply inside those bounds.
+
+step: number
+    Standard deviation of each coordinate's Gaussian Metropolis proposal.
+    It is NOT a grid spacing, number of iterations or maximum allowed change.
+    If omitted, it defaults to 5% of that coordinate's bound width.
+    Bayesian candidate sampling uses bounds, not this proposal step.
+    To fix a parameter for BOTH methods, omit it from the search; do not use step=0.
+
+initial: number or array (optional)
+    Starting value; otherwise use the value from the configuration after --set.
+    It must be within bounds and satisfy physical constraints.
+    For a whole per-bead array provide N values. For an indexed entry provide one.
+
+An initial array is not required just because you search an array: the existing
+per-bead values are used automatically. If you select a global parameter, its
+single initial value is broadcast to the whole corresponding array.
+
+4. EVERY SUPPORTED FREE PARAMETER
+
+Names are case-sensitive: F0 uses the digit zero and T_signal begins with capital T.
+All lengths, times, forces and viscosities use the simulator's consistent units.
+
+A. Trap properties: global default -> independent per-bead array
+
+alpha -> alpha_per_bead
+    Longitudinal potential exponent, dimensionless and positive.
+    alpha=2 is harmonic. Other values give nonlinear force profiles.
+
+beta -> beta_per_bead
+    Transverse potential exponent, dimensionless and positive.
+
+kx -> kx_per_bead
+    Positive longitudinal potential coefficient.
+    Each bead can have its own value, independently of its alpha.
+
+ky -> ky_per_bead
+    Positive transverse potential coefficient; controls transverse confinement.
+
+amplitude -> amplitude_per_bead
+    Positive excursion A, in length units. Switching thresholds are +/-A_i/2
+    along each bead's local stroke direction, measured from its reference point.
+
+epsilon -> epsilon_per_bead
+    Positive distance placing the active trap beyond its switching threshold.
+    Trap offset magnitude is A_i/2 + epsilon_i.
+
+default_lambda -> lambdas
+    Dimensionless trap-profile parameter. There is no lambda_per_bead key:
+    the existing array name is lambdas. Values must keep the effective trap
+    profile positive: 1 + lambda_i*((i-(N-1)/2)^2 - 0.25) > 0.
+
+Every array above supports indexing, e.g. alpha_per_bead[2], lambdas[4].
+
+Important force convention:
+    F_parallel,i = -kx_i*H_i*alpha_i*d_i*abs(d_i)^(alpha_i-2).
+    kx is a potential coefficient, not generally a linear spring constant.
+    At alpha_i=2 the spring constant is 2*H_i*kx_i.
+    H_i includes the existing spacing and lambda profile. Setting lambdas to
+    zero removes the index-dependent profile, but not the spacing factor.
+    Coefficient dimensions depend on exponent; changing alpha does not
+    automatically preserve a reference force or normalise the potential.
+
+B. Geometry and bead size
+
+angles_deg
+    N independent fixed stroke directions, in degrees anticlockwise from +x.
+    Supports indexing, e.g. angles_deg[5]. In Blake mode these are parallel
+    to the wall. Angles stay fixed during each simulation.
+    Bounds are ordinary numerical intervals: there is no angle wrapping or
+    periodic Gaussian-process kernel.
+
+positions
+    N-2 inner reference x coordinates, measured from the first endpoint at x=0.
+    The last endpoint stays at x=chain_length. For six beads this is FOUR
+    variables, not six. It does not specify the instantaneous bead positions.
+    The code converts these coordinates into neighbouring reference gaps.
+    Coordinates must imply valid ordered, sufficiently separated positions.
+    Indexed positions[0] searches are NOT supported in this version.
+    positions is distinct from distances, which is a fixed input array.
+
+base_distance
+    Positive reference length used in the chain's trap-strength scaling.
+    Varying it does NOT change the actual reference gaps or total chain length.
+
+bead_radius
+    One positive radius shared by ALL beads. Changes drag, finite-size RPY
+    coupling and thermal covariance. Per-bead radii are NOT implemented.
+    Reference gaps must exceed the diameter; Blake adds stronger restrictions.
+
+C. Fluid and thermal properties
+
+viscosity
+    Positive fluid viscosity. Use the existing model's unit convention.
+    It changes the mobility converting forces to velocities.
+
+temperature
+    Nonnegative physical/effective temperature entering thermal displacement.
+    Zero disables stepwise Brownian noise; initial conditions remain random.
+    This is separate from --search-temperature (Metropolis acceptance setting).
+
+velox, veloy
+    Uniform imposed laboratory x/y velocity, in length/time.
+    Available as search variables in Oseen and Rotne-Prager modes.
+    Both must be zero in Blake mode; use shear_x/shear_y instead.
+    Flow adds a velocity, unlike the force signal described below.
+
+D. External signal
+
+F0
+    Nonnegative square-wave FORCE amplitude, shared by the driven beads.
+    The force acts along each driven bead's local positive stroke axis.
+    Matched experiments drive the first bead, then the last bead, then use
+    zero force for control; they retain the same underlying configuration.
+
+T_signal
+    Positive square-wave period, in time units. Forcing starts after t=5.
+    The evaluator requires T_signal >= 20*dt and sufficient common phase
+    coverage after the analysis start (normally t=7).
+    Short periods can increase recording frequency and output volume.
+
+E. Wall and wall-compatible flow: Blake mode only
+
+wall_height
+    Common bead-centre height h above the stationary wall at z=0.
+    It is a centre-to-wall distance, not the surface gap (which is h-a).
+    Height stays fixed during the simulation and must satisfy h >= 3*a.
+
+shear_x, shear_y
+    Imposed shear rates, in inverse time. They may be positive, zero or negative.
+    u(z) = z*(shear_x, shear_y, 0), so all beads at height h sample the same
+    imposed velocity while the flow vanishes at the wall.
+    These are not oscillatory force signals. They must be zero outside Blake.
+
+5. CONSTRAINTS AND PARAMETERS THAT ARE NOT FREE SEARCH COORDINATES
+
+Do not select overlapping representations of a property:
+    Invalid: kx together with kx_per_bead.
+    Invalid: alpha together with alpha_per_bead[0].
+    Invalid: kx_per_bead together with kx_per_bead[2].
+    Valid:   kx_per_bead[0] together with kx_per_bead[2].
+
+All per-bead arrays need N values. Physical coefficients, exponents, amplitudes,
+epsilon, viscosity, radius and signal period must be positive. Temperature and
+F0 may be zero. Search bounds may include invalid combinations; invalid
+configurations are rejected, but avoid ranges with almost no valid points.
+The initial configuration must itself be valid.
+
+Reference gaps must be at least 3.1 model length units and exceed 2*bead_radius.
+Blake additionally requires wall_height >= 3*bead_radius and instantaneous
+pair distances >= 4*bead_radius. Large excursions can violate the latter even
+when reference gaps pass validation. A runtime failure stops the evaluation;
+it is not silently assigned a zero score. Choose spacing and excursions jointly.
+These guards do not prove far-field accuracy. Blake uses point-force pair
+interactions, not finite-size RPY-Blake or lubrication/contact physics.
+
+The following are NOT free coordinates in search.json:
+    mobility: categorical model choice (oseen, rotne_prager or blake).
+    num_beads: choose an appropriate template and matching array lengths.
+    dt, total_time, sampling_feedback, sampling_write: numerical/run settings.
+    distances: set fixed gaps; search inner positions to vary chain geometry.
+    signal_beads: overridden by the matched forward/backward/control protocol.
+    ks, fl0: unused legacy fields.
+    d_avg, d_grad, g_factor, asymmetry: characterisation sweep controls only.
+    Per-bead viscosity, temperature, radius, signal period or signal amplitude.
+
+Use the template or --set for supported fixed configuration settings.
+For example, --set total_time 100 sets the duration; it does not optimise it.
+At least one free coordinate is required to run optimisation.
+
+6. COPYABLE COMPLETE search.json EXAMPLES
+
+Each object below is a SEPARATE complete search file. Do not paste multiple
+objects consecutively into one file. The examples use values compatible with
+the supplied six-bead wall template unless otherwise stated.
+Their ranges are demonstrations, not scientifically validated recommendations.
+
+A. Six independent longitudinal coefficients
+
+{
+  "kx_per_bead": {
+    "bounds": [
+      8,
+      14
+    ],
+    "step": 0.2
+  }
+}
+
+B. Only the first and second beads vary
+
+{
+  "kx_per_bead[0]": {
+    "bounds": [
+      8,
+      14
+    ],
+    "step": 0.2
+  },
+  "kx_per_bead[1]": {
+    "bounds": [
+      8,
+      14
+    ],
+    "step": 0.2
+  }
+}
+
+C. Each bead has its own exponent AND coefficient (12 variables)
+
+{
+  "alpha_per_bead": {
+    "bounds": [
+      0.5,
+      1.5
+    ],
+    "step": 0.03
+  },
+  "kx_per_bead": {
+    "bounds": [
+      8,
+      14
+    ],
+    "step": 0.2
+  }
+}
+
+D. Different bounds, starting values and steps for six coefficients
+
+{
+  "kx_per_bead": {
+    "bounds": [
+      [
+        8,
+        8,
+        8,
+        8,
+        8,
+        8
+      ],
+      [
+        12,
+        13,
+        14,
+        15,
+        16,
+        17
+      ]
+    ],
+    "initial": [
+      10,
+      10.2,
+      10.4,
+      10.6,
+      10.8,
+      11
+    ],
+    "step": [
+      0.1,
+      0.2,
+      0.2,
+      0.3,
+      0.3,
+      0.4
+    ]
+  }
+}
+
+E. Individual stiffnesses, one exponent and wall height (8 variables)
+
+{
+  "kx_per_bead": {
+    "bounds": [
+      8,
+      14
+    ],
+    "step": 0.2
+  },
+  "alpha_per_bead[0]": {
+    "bounds": [
+      0.5,
+      1
+    ],
+    "step": 0.02
+  },
+  "wall_height": {
+    "bounds": [
+      5,
+      10
+    ],
+    "step": 0.2
+  }
+}
+
+F. All stroke directions and the common bead radius (7 variables)
+
+{
+  "angles_deg": {
+    "bounds": [
+      -90,
+      90
+    ],
+    "step": 5
+  },
+  "bead_radius": {
+    "bounds": [
+      0.7,
+      1.2
+    ],
+    "step": 0.03
+  }
+}
+
+G. Wall height and imposed shear (Blake only)
+
+{
+  "wall_height": {
+    "bounds": [
+      5,
+      10
+    ],
+    "step": 0.2
+  },
+  "shear_x": {
+    "bounds": [
+      -0.05,
+      0.05
+    ],
+    "step": 0.005
+  }
+}
+
+H. Inner reference positions and driving signal (6 variables for six beads)
+
+{
+  "positions": {
+    "step": 0.5
+  },
+  "F0": {
+    "bounds": [
+      1,
+      4
+    ],
+    "step": 0.1
+  },
+  "T_signal": {
+    "bounds": [
+      0.1,
+      0.3
+    ],
+    "step": 0.005
+  }
+}
+
+In example D, the first bounds array contains ALL lower bounds and the second
+contains ALL upper bounds. It is not a list of [lower,upper] pairs per bead.
+Use fewer free coordinates initially; 6 alphas + 6 kx values + 6 angles already
+make an 18-dimensional search.
+
+7. FIXED VALUES AND COMMANDS
+
+To fix a particular coefficient while searching other properties, omit it
+(and any global/whole-array selection that would overwrite it), then set:
+
+    --set 'kx_per_bead[0]' 12
+
+For a complete fixed array:
+
+    --set kx_per_bead '[8, 10, 12, 9, 15, 11]'
+
+If you also select that parameter in search.json, --set only sets its baseline;
+it does NOT constrain it to stay fixed.
+
+For a fixed mobility string, retain JSON quotes inside the shell quotes:
+
+    --set mobility '"blake"'
+
+The supplied wall template already selects Blake, so this override is unnecessary
+when using it. Changing an old template to Blake also requires valid height,
+spacing, excursions and background-flow settings.
+
+After saving ONE example as search.json, run a small Metropolis pilot:
+
+python analysis/optimisation.py --method metropolis --config templates/6beads_wall_heterogeneous.input --search search.json --set total_time 50 --iterations 5 --runs 1 --cores 1 --out results/search_pilot
+
+Or a small Bayesian pilot:
+
+python analysis/optimisation.py --method bayesian --config templates/6beads_wall_heterogeneous.input --search search.json --set total_time 50 --initial 4 --iterations 5 --runs 1 --cores 1 --out results/search_bayes_pilot
+
+Choose new output folders for new experiments. For unbounded runs use an
+unbounded template and omit wall_height/shear searches.
+
+--iterations controls search steps, not simulation duration.
+--runs controls independent matched experiment repeats per evaluated candidate.
+--cores controls concurrent repeats, not the number of beads or free variables.
+Each evaluated candidate costs 3*--runs simulations: forward, backward, control.
+Bayesian --initial counts the initial point plus random initial points before
+its acquisition iterations. Neither method guarantees a global optimum.
+
+The objective remains mean_over_repeats(R_last_forward - R_first_backward).
+Adding free parameters does not change the objective or the definition of R.
+
+To characterise the best measured configuration on fresh repeats:
+
+python analysis/diode_characterisation.py mechanism --config results/search_pilot/best.json --time 100 --runs 3 --cores 3 --keep --out results/search_validation
+
+8. JSON AND PRACTICAL CHECKS
+
+Use double quotes around names. No comments, trailing commas, Python tuples,
+NaN or Infinity are allowed. Use one top-level object with unique parameter keys.
+Do not use index 6 for a six-bead array: the final bead is index 5.
+Check bounds include the starting values, or supply a valid initial override.
+Quote bracketed keys and array values in terminal commands.
+
+To check JSON syntax only:
+
+python -m json.tool search.json
+
+This does not check physical constraints; the optimiser validates those when
+constructing its parameter space and candidate configurations.
+
+Thermal Blake runs include a mobility-divergence drift and require 4N extra
+mobility evaluations per step. Start with short pilots. The wall template uses
+temperature=0 for speed, but still randomises initial conditions. Assess thermal
+robustness separately. Use adequate dt, recording resolution, observation time
+and repeat count before drawing physical conclusions.
+
+This guide describes the delivered wall/per-bead update. Future code changes
+may add names; analysis/simulation.py SEARCHABLE is the authoritative catalogue.
