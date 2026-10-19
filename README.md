@@ -10,7 +10,7 @@ template or an existing trajectory.
 
 Run all commands below from the **repository root**, which contains `src/`,
 `analysis/` and `templates/`. The Python experiment runner currently uses chain
-geometry and Rotne–Prager mobility. Other geometries remain available through
+geometry and defaults to Rotne–Prager mobility; Oseen and Blake are also selectable. Other geometries remain available through
 the C++ executable directly.
 
 ## 1. Build the C++ simulator
@@ -28,8 +28,8 @@ This produces `src/rowers`. The Makefile attempts to download Eigen 3.4.0 if the
 Verify that `src/eigen-3.4.0/Eigen/Dense` exists if compilation reports missing
 Eigen headers. Reinstall the complete Eigen directory if necessary.
 
-Rebuild after changing C++ source. The supplied Makefile does not track header
-dependencies, so after changing a `.h` file use:
+The updated Makefile tracks header dependencies. For the first build after
+installing this update, remove old objects and rebuild:
 
 ```bash
 make -C src clean
@@ -80,7 +80,8 @@ selects the hydrodynamic approximation:
 | Geometry | `-C` | Chain with reference positions along x. |
 | Geometry | `-R` | Ring of reference positions. |
 | Geometry | `-A` | Arbitrary reference positions supplied in the input. |
-| Mobility | `-R` | Rotne–Prager finite-size correction; used by the Python pipeline. |
+| Mobility | `-R` | Rotne–Prager finite-size correction; Python default. |
+| Mobility | `-B` | Blake point-force wall model with fixed-height constraints. |
 | Mobility | `-O` | Oseen point-particle approximation. |
 
 All layouts support a fixed oscillation angle for each bead. Without an angle
@@ -98,6 +99,7 @@ The command writes a `6beads/` directory under the current working directory:
 | Output | Contents |
 | --- | --- |
 | `*.dat` | Frame index, physical time, then laboratory x/y bead coordinates. |
+| `*.hydro` | Mobility name, wall height and imposed shear; confirms simulator settings. |
 | `*.axes` | One row per bead: angle in degrees, reference x, reference y. Used for local-axis analysis. |
 | `*.trap` | Trap-centre records in the simulator's own output format. |
 | `*.forces` | Frame, physical time and force components after the timestamp fix. |
@@ -118,7 +120,7 @@ To run the supplied angled example:
 ```
 
 The first line remains the original numerical configuration. An optional later
-line specifies `angles_deg` followed by exactly N angles; see Section 7. Blank
+labelled lines specify angles, per-bead trap parameters and wall settings; see Section 7. Blank
 lines and `#` comments are accepted after the numerical first line. Use one
 configuration per file. Multiple files can be processed sequentially:
 
@@ -184,6 +186,33 @@ or `lambdas` instead. Do not select a global value and its per-bead array togeth
 Scalar bounds/steps broadcast across an array; separate bounds can be given as
 `[[lower_0, lower_1, ...], [upper_0, upper_1, ...]]`. The array length is determined
 by the number of beads. Positions have N-2 entries; endpoints remain fixed.
+
+### Independent bead parameters and indexed searches
+
+Six beads have six distinct longitudinal coefficients in `kx_per_bead`. Searching
+that array makes six independent variables. Searching global `kx` instead uses
+one common coefficient for all beads. The same convention applies to alpha,
+beta, ky, amplitude, epsilon and their per-bead arrays (lambda uses `lambdas`).
+
+```json
+{
+  "kx_per_bead": {"bounds": [8, 14], "step": 0.2},
+  "alpha_per_bead[0]": {"bounds": [0.5, 1.0], "step": 0.02},
+  "wall_height": {"bounds": [5, 10], "step": 0.2}
+}
+```
+
+This example has eight variables: six independent kx values, bead 0's alpha,
+and height. `wall_height` requires Blake mode. To vary only two stiffnesses,
+select `kx_per_bead[0]` and `kx_per_bead[1]` instead of the whole array. Quote
+bracketed names in shell commands. Global/array/index overlaps are rejected.
+`bead_radius` is now searchable, but remains one common radius, not N radii.
+
+`search_help.json` is a valid JSON reference with explanations and copyable
+examples; it is NOT a runnable search specification. Use `search_wall.json`
+for the example above. Omit variables to fix them; setting `step` to zero does
+not fix a variable for Bayesian optimisation. Angles, radius, wall height and
+trap parameters are retained in best.json and all matched experiments.
 
 ### Search or fix the oscillation angles
 
@@ -481,6 +510,36 @@ beads, include both full stiffness blocks first. The Python input writer always
 emits the complete blocks to avoid ambiguity, then writes the labelled angle
 line separately. Do not append angles to the positional first-line blocks.
 
+### Labelled per-bead and wall extensions
+
+The first-line scalars remain defaults. Missing arrays are filled from their
+corresponding scalar; supplied arrays override them. The new arrays are
+`alpha_per_bead`, `beta_per_bead`, `amplitude_per_bead`, `epsilon_per_bead`.
+The existing `kx_per_bead`, `ky_per_bead` and `lambdas` can also be specified as
+labelled lines, overriding their legacy positional blocks. Each needs N values.
+A fixed global override broadcasts first, then explicit per-bead overrides win.
+
+```text
+mobility blake
+wall_height 6
+shear_x 0
+shear_y 0
+alpha_per_bead 0.5 0.55 0.6 0.65 0.7 0.75
+beta_per_bead 2 2 2 2 2 2
+kx_per_bead 10 10.2 10.4 10.6 10.8 11
+ky_per_bead 10 10 10 10 10 10
+amplitude_per_bead 3 3 3 3 3 3
+epsilon_per_bead 0.3 0.3 0.3 0.3 0.3 0.3
+```
+
+These lines follow the numeric first line. `mobility` accepts `oseen`,
+`rotne_prager`, `blake`; an explicit input line takes precedence over the CLI
+mobility flag. Without it, direct C++ uses its flag and Python defaults to
+Rotne–Prager. Unknown/duplicate labels, non-finite values, wrong array lengths
+and nonpositive trap parameters are rejected. The Python writer resolves all
+arrays and writes complete settings. Old complete JSON configurations are
+filled with the new defaults when loaded.
+
 ### Optional angle line
 
 After the numerical line, add exactly one finite angle per bead:
@@ -519,17 +578,17 @@ For angle theta_i, define the local unit vectors
 `q_i = (r_i-R_i) dot e_i` the longitudinal displacement and
 `p_i = (r_i-R_i) dot n_i` the transverse displacement.
 
-The active trap centre is `R_i + s_i*(A/2 + epsilon)*e_i`, where `s_i` is +1 or
+The active trap centre is `R_i + s_i*(A_i/2 + epsilon_i)*e_i`, where `s_i` is +1 or
 −1. Here `s_i` labels the trap side, not the external signal. With
-`delta_parallel = q_i - s_i*(A/2 + epsilon)`, the longitudinal force is
-`−kx_i * H_i * alpha * delta_parallel * abs(delta_parallel)^(alpha−2)`, plus
+`delta_parallel = q_i - s_i*(A_i/2 + epsilon_i)`, the longitudinal force is
+`−kx_i * H_i * alpha_i * delta_parallel * abs(delta_parallel)^(alpha_i−2)`, plus
 the square-wave signal on selected beads. The transverse force is
-`−ky_i * H_i * beta * p_i * abs(p_i)^(beta−2)`. The code retains its existing
+`−ky_i * H_i * beta_i * p_i * abs(p_i)^(beta_i−2)`. The code retains its existing
 near-zero displacement guards. Thus alpha=2 gives a harmonic longitudinal
 potential; kx is a potential coefficient and the force includes the factor alpha.
 
 The laboratory force is `F_parallel*e_i + F_perp*n_i`. Traps switch to the
-negative side when `q_i > A/2` and to the positive side when `q_i < -A/2`, at the
+negative side when `q_i > A_i/2` and to the positive side when `q_i < -A_i/2`, at the
 existing feedback-check intervals. Initial random offsets are rotated onto the
 same local axis. Transverse confinement remains finite: a bead is not rigidly
 constrained to a line.
@@ -537,7 +596,9 @@ constrained to a line.
 The full mobility tensor, correlated thermal noise and background flow remain
 in laboratory coordinates. The existing tensor handles the rotated forces;
 no new mobility approximation is needed. `velox` and `veloy` retain their global
-x/y meanings. Setting all angles to zero recovers the original model.
+x/y meanings in unbounded modes. Setting all angles to zero and retaining
+global trap defaults recovers the horizontal trap model. Blake instead uses
+the shear settings described below.
 
 The factor H_i depends on local reference spacing and lambda_i. Lambda changes
 trap strength, rather than directly multiplying the hydrodynamic tensor. Moving
@@ -548,6 +609,65 @@ temperature.
 The external signal is `F0 * sign(cos(2*pi*time/T_signal))` after time 5. Its phase
 clock is not reset when forcing begins. The code uses a definite branch at cosine
 zero, so this expression is shorthand for its implemented square wave.
+
+### Blake wall model and a heterogeneous example
+
+The wall is the stationary plane z=0. Bead centres remain at common height h,
+with motion and stroke angles in the parallel xy-plane. This release does not
+simulate strokes towards/away from the wall, per-bead heights or per-bead radii.
+
+```bash
+./src/rowers -C -B templates/6beads_wall_heterogeneous.input
+python analysis/optimisation.py --method metropolis --config templates/6beads_wall_heterogeneous.input --search search_wall.json --set total_time 50 --iterations 5 --runs 1 --cores 1 --out results/wall_pilot
+python analysis/diode_characterisation.py mechanism --config results/wall_pilot/best.json --time 100 --runs 3 --cores 3 --keep --out results/wall_mechanism
+```
+
+The new template uses six beads, radius 1, five gaps of 12 (total length 60),
+height 6, individual exponents/stiffnesses and temperature 0 for a fast pilot.
+Use `--method bayesian` with the same search to use Bayesian optimisation.
+Global signal amplitude/period and the directional objective are unchanged.
+
+The pair kernel is the point-force Blake image system, including its Stokeslet,
+source-doublet and Stokes-doublet contributions. Self mobilities use the
+parallel/normal series in Bruot & Cicuta (2016), Section 3.1.3, Eq. (4); pair
+terms follow Eqs. (5)-(6). The finite-radius pair correction in Eq. (7) is NOT
+included. This is not RPY-Blake, lubrication theory or a contact model.
+Reference: https://doi.org/10.1146/annurev-conmatphys-031115-011451
+
+We assemble the 3N mobility, then eliminate normal constraint forces with
+`M_eff = M_pp - M_pz * inverse(M_zz) * M_zp`. This enforces fixed height, rather
+than simply dropping the normal velocities. Both the normal block and effective
+mobility must be positive definite; failures raise errors, never artificial
+matrix jitter. Height must be at least 3 radii and instantaneous pair distance
+at least 4 radii. These operational guards do not prove asymptotic accuracy;
+use larger separations and compare approximations for scientific conclusions.
+
+The h->infinity limit is Oseen with Stokes self drag, NOT finite-size RPY.
+At finite temperature, noise covariance is `2*kBT*M_eff*dt`, and the Itô drift
+`kBT*div(M_eff)*dt` is included via centred finite differences in planar
+coordinates, with derivative step `1e-5*bead_radius`. This requires 4N extra
+wall-mobility evaluations per integration step and is substantially slower.
+The legacy unbounded integration is retained; this is not a new general audit
+of its planar Brownian approximation. Initial conditions remain random at T=0.
+
+Uniform `velox`/`veloy` are rejected in Blake mode. Instead specify `shear_x`
+and/or `shear_y` (inverse time), giving imposed flow
+`u(z)=z*(shear_x,shear_y,0)`. At height h all beads sample the same imposed
+velocity, while the flow vanishes at the wall. This is the imposed-flow
+approximation used by the model, not a full sphere stresslet/rotation model.
+The external square-wave signal remains a force along each driven bead's local
+axis and is distinct from imposed flow. Shear fields are rejected outside Blake.
+
+All per-bead coefficients still include the existing H_i multiplier: for
+alpha_i=2 the longitudinal spring constant is `2*H_i*kx_i`. Zero lambdas remove
+the index-dependent profile but not the spacing factor. Changing exponents does
+not renormalise forces or coefficient units.
+
+The update also fixes the dimensional error in the RPY overlap coefficient
+(to `3*r/(32*a)` multiplying the unit dyad), records forces at their actual
+output time, checks Cholesky failures, and removes `-ffast-math` so finite-value
+checks remain meaningful. These fixes may change old overlapping-bead results.
+They do not add steric repulsion. Direct C++ failures now return nonzero status.
 
 ## 8. Interpretation and numerical checks
 
@@ -560,15 +680,16 @@ steep/singular force profiles and locking boundaries.
 
 The information-transfer mode (phase jump, response delay, message transmission)
 is deliberately not implemented: the current C++ signal cannot express those
-protocols. It requires an explicit future simulator extension. Per-bead alpha
-also requires C++ support; alpha here is global.
+protocols. It requires an explicit future simulator extension. Per-bead alpha is now supported through `alpha_per_bead`; selecting global
+`alpha` intentionally broadcasts one value to every bead.
 
 The angle extension adds fixed in-plane directions only: it does not add
-rotational dynamics, walls or a guarantee of nonreciprocal hydrodynamic mobility.
+rotational dynamics or a guarantee of nonreciprocal hydrodynamic mobility.
+The wall extension below adds a stationary plane beneath those strokes.
 Angular patterns can change coupling and the nonlinear driven response; diode
 behaviour still needs to be measured using the same diagnostics.
 
-The angle update was compiled and checked for force/mobility rotation covariance
+The earlier angle update was compiled and checked for force/mobility rotation covariance
 at 0°, 45° and 90°, including the drive. Checks also covered legacy input/JSON
 defaults, input roundtripping, vertical-stroke phase recovery, real angled
 forward/backward/control analysis, spectra, trajectory plotting and short
@@ -576,7 +697,7 @@ Metropolis/Bayesian searches. These checks do not establish scientific convergen
 
 This package does not assert a new licence over your existing source. Before
 public release, choose a licence with the project's owners and preserve existing
-attributions. `TESTING.md` records what was checked for this refactor.
+attributions. `TESTING_WALL.md` records checks and limitations for the wall/heterogeneity update.
 
 ## 9. Migration from the old scripts
 
@@ -602,10 +723,12 @@ or warm-start observations.
 
 For the angle update, replace `src/Types.h`, `src/Simulation.cpp`,
 `src/PhysicsEngine.cpp`, `analysis/simulation.py`, `analysis/bead_analysis.py`,
-and `analysis/diode_characterisation.py`. Add the supplied
+and `analysis/diode_characterisation.py`. The wall update additionally changes
+`src/PhysicsEngine.h`, `src/Simulation.h`, `src/main.cpp`, `src/Makefile`,
+`analysis/optimisation.py` and `analysis/disorder.py`. Add the supplied
 `templates/6beads_angles.input` and `search_angles.json`, then clean and rebuild.
-The existing `optimisation.py` and `disorder.py` use the updated shared functions
-without source edits. Existing templates and complete saved configurations
+The optimisers and disorder evaluator retain their objectives and use the
+updated shared configuration functions. Existing templates and complete saved configurations
 without angles continue to mean horizontal strokes.
 
 Output folders are explicitly named with `--out`, rather than automatically
@@ -615,6 +738,11 @@ Optimisation duration is set with `--set total_time VALUE`; characterisation als
 has `--time VALUE`. Derived geometry controls such as `d_avg` are diagram axes,
 not accepted fixed-input names for `--set`; use explicit `distances` for a fixed
 geometry.
+
+The wall package additionally supplies `templates/6beads_wall_heterogeneous.input`,
+`search_wall.json`, `search_help.json`, `TESTING_WALL.md` and three focused test
+sources under `tests/`. Raw outputs now include `.hydro`; Python verifies it to
+catch stale executables. Keep `.axes` beside `.dat` for trajectory analysis.
 
 ## 10. Help and reproducibility
 
@@ -627,6 +755,6 @@ python analysis/disorder.py --help
 
 Record the complete configuration (including angles), search file, code version, executable and
 analysis settings alongside reported results. The pipeline stores configuration
-and code/executable hashes with its records. Consult `TESTING.md` for the scope
+and code/executable hashes with its records. Consult `TESTING_WALL.md` for the scope
 of the delivered validation; short smoke tests are not substitutes for timestep,
 repeat-count and observation-time convergence checks.
