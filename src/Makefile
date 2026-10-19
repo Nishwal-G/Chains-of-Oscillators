@@ -1,5 +1,5 @@
 CXX = g++
-CXXFLAGS = -O3 -std=c++17 -Wall -Wextra -march=native -ffast-math -I./eigen-3.4.0 -I.
+CXXFLAGS = -O3 -std=c++17 -Wall -Wextra -march=native -MMD -MP -I./eigen-3.4.0 -I.
 LDFLAGS = 
 
 TARGET = rowers
@@ -24,7 +24,7 @@ eigen-3.4.0:
 	@echo "Eigen downloaded and extracted."
 
 clean:
-	rm -f $(TARGET) $(OBJECTS)
+	rm -f $(TARGET) $(OBJECTS) $(OBJECTS:.o=.d)
 
 distclean: clean
 	rm -rf eigen-3.4.0
@@ -42,3 +42,6 @@ help:
 	@echo "  1. Run 'make distclean'"
 	@echo "  2. Run 'make'"
 	@echo "  3. This will re-download a fresh, correctly structured Eigen library."
+
+# Track included headers so changes to per-bead configuration trigger rebuilds.
+-include $(OBJECTS:.o=.d)

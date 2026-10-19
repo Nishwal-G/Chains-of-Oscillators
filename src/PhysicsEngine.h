@@ -91,6 +91,11 @@ public:
 
     */
     double getNormalRandom();
+    // Fixed-height mobility divergence for the Itô thermal drift.
+    VectorXd mobilityDivergence(const State& state) const;
+    // Point-force Blake Green function, including 1/(8*pi*eta).
+    Matrix3d blakePair(const Vector3d& target, const Vector3d& source) const;
+    MatrixXd wallMobility(const State& state) const;
 
 private:
     // These members are internal to PhysicsEngine.

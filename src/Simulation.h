@@ -42,7 +42,7 @@ public:
     */
     explicit Simulation(const std::string& input_file,
                         GeometryType geometry,
-                        bool use_rotne_prager);
+                        MobilityType mobility);
 
     /*
     Runs the prepared experiment.

@@ -4,15 +4,16 @@
 #include <filesystem>
 #include <cmath>
 #include <iomanip>
+#include <map>
 
 namespace modern {
 
 static constexpr double KB = 1.3806504E-5;
 
-Simulation::Simulation(const std::string& input_file, GeometryType geometry, bool use_rotne_prager)
+Simulation::Simulation(const std::string& input_file, GeometryType geometry, MobilityType mobility)
     : input_filename_(input_file), state_(0), geometry_arg_(geometry) {
+    config_.mobility = mobility;
     parseInput(input_file);
-    config_.use_rotne_prager = use_rotne_prager;
     initializeState();
     engine_ = std::make_unique<PhysicsEngine>(config_);
 
@@ -34,6 +35,8 @@ void Simulation::parseInput(const std::string& input_file) {
     double val;
     while (iss >> val) p.push_back(val);
 
+    for (double value : p)
+        if (!std::isfinite(value)) throw std::runtime_error("Non-finite first-line value");
     if (p.size() < 22) throw std::runtime_error("Not enough parameters in input file");
 
     config_.num_beads       = static_cast<int>(p[0]);
@@ -61,27 +64,38 @@ void Simulation::parseInput(const std::string& input_file) {
     config_.geometry        = geometry_arg_;
 
     int N = config_.num_beads;
+    if (p[0] != N) throw std::runtime_error("Noninteger bead count");
     if (N < 1) throw std::runtime_error("num_beads must be positive");
-    // Optional second-line extension avoids changing any legacy numeric columns.
-    // Angles are supplied in degrees, converted once to radians internally.
-    config_.angles.assign(N, 0.0);
-    bool seen_angles = false;
+    // Labelled extensions override legacy defaults without changing first-line columns.
+    std::map<std::string, std::vector<double>> extensions;
+    bool seen_mobility = false;
     while (std::getline(is, line)) {
         line = line.substr(0, line.find('#'));
         std::istringstream extra(line);
         std::string key;
         if (!(extra >> key)) continue;
-        if (key != "angles_deg" || seen_angles)
-            throw std::runtime_error("Expected one optional angles_deg line");
-        seen_angles = true;
-        for (int i = 0; i < N; ++i) {
-            double degrees;
-            if (!(extra >> degrees) || !std::isfinite(degrees))
-                throw std::runtime_error("angles_deg needs N finite values");
-            config_.angles[i] = degrees * M_PI / 180.0;
+        if (key == "mobility") {
+            std::string choice, excess;
+            if (seen_mobility || !(extra >> choice) || (extra >> excess))
+                throw std::runtime_error("Malformed/duplicate mobility line");
+            seen_mobility = true;
+            if (choice == "oseen") config_.mobility = MobilityType::OSEEN;
+            else if (choice == "rotne_prager") config_.mobility = MobilityType::ROTNE_PRAGER;
+            else if (choice == "blake") config_.mobility = MobilityType::BLAKE;
+            else throw std::runtime_error("Unknown mobility");
+            continue;
         }
-        std::string excess;
-        if (extra >> excess) throw std::runtime_error("Too many angles_deg values");
+        if (extensions.count(key)) throw std::runtime_error("Duplicate extension: " + key);
+        std::vector<double> values;
+        std::string token;
+        while (extra >> token) {
+            size_t used = 0;
+            double value = std::stod(token, &used);
+            if (used != token.size() || !std::isfinite(value))
+                throw std::runtime_error("Non-finite/non-numeric extension: " + key);
+            values.push_back(value);
+        }
+        extensions[key] = values;
     }
     int current = 22;
     if (config_.geometry == GeometryType::CHAIN && p.size() < size_t(22 + N - 1))
@@ -128,6 +142,51 @@ void Simulation::parseInput(const std::string& input_file) {
     if (config_.kx_per_bead.empty()) config_.kx_per_bead.assign(N, config_.kx);
     if (config_.ky_per_bead.empty()) config_.ky_per_bead.assign(N, config_.ky);
     if (config_.signal_beads.empty()) config_.signal_beads.push_back(0);
+    // Resolve every per-bead property once. Explicit arrays win over defaults.
+    config_.angles.assign(N, 0.0);
+    config_.alpha_per_bead.assign(N, config_.alpha);
+    config_.beta_per_bead.assign(N, config_.beta);
+    config_.amplitude_per_bead.assign(N, config_.amplitude);
+    config_.epsilon_per_bead.assign(N, config_.epsilon);
+    std::map<std::string, std::vector<double>*> arrays = {
+        {"angles_deg", &config_.angles}, {"alpha_per_bead", &config_.alpha_per_bead},
+        {"beta_per_bead", &config_.beta_per_bead}, {"kx_per_bead", &config_.kx_per_bead},
+        {"ky_per_bead", &config_.ky_per_bead}, {"amplitude_per_bead", &config_.amplitude_per_bead},
+        {"epsilon_per_bead", &config_.epsilon_per_bead}, {"lambdas", &config_.lambdas}};
+    std::map<std::string, double*> scalars = {{"wall_height", &config_.wall_height},
+        {"shear_x", &config_.shear_x}, {"shear_y", &config_.shear_y}};
+    for (const auto& item : extensions) {
+        if (arrays.count(item.first)) {
+            if (item.second.size() != size_t(N)) throw std::runtime_error(item.first + " needs N values");
+            *arrays.at(item.first) = item.second;
+        } else if (scalars.count(item.first)) {
+            if (item.second.size() != 1) throw std::runtime_error(item.first + " needs one value");
+            *scalars.at(item.first) = item.second[0];
+        } else throw std::runtime_error("Unknown extension: " + item.first);
+    }
+    for (double& angle : config_.angles) angle *= M_PI / 180.0;
+    for (const auto& item : arrays) {
+        if (item.first == "angles_deg" || item.first == "lambdas") continue;
+        for (double value : *item.second)
+            if (!(value > 0)) throw std::runtime_error(item.first + " must be positive");
+    }
+    for (int i = 0; i < N; ++i) {
+        double index = i - (N - 1) / 2.0;
+        if (!(1.0 + config_.lambdas[i]*(index*index - 0.25) > 0))
+            throw std::runtime_error("Nonpositive trap profile");
+    }
+    if (!(config_.bead_radius > 0 && config_.viscosity > 0 && config_.dt > 0 &&
+          config_.total_time > 0 && config_.t_signal > 0 && config_.temperature >= 0 &&
+          config_.sampling_feedback > 0 && config_.sampling_write > 0))
+        throw std::runtime_error("Invalid physical/numerical scalars");
+    if (config_.mobility == MobilityType::BLAKE) {
+        if (!(config_.wall_height >= 3*config_.bead_radius))
+            throw std::runtime_error("Blake requires wall_height >= 3*bead_radius (far-field guard)");
+        if (config_.velox != 0 || config_.veloy != 0)
+            throw std::runtime_error("Blake: use shear_x/shear_y instead of uniform velox/veloy");
+    } else if (config_.shear_x != 0 || config_.shear_y != 0)
+        throw std::runtime_error("shear_x/shear_y require Blake mode");
+
 }
 
 void Simulation::initializeState() {
@@ -143,12 +202,12 @@ void Simulation::initializeState() {
             state_.reference_pos(2 * i)     = current_x;
             state_.reference_pos(2 * i + 1) = 0;
 
-            double noise = dist(rng) * config_.amplitude;
+            double noise = dist(rng) * config_.amplitude_per_bead[i];
             state_.positions(2 * i)     = current_x + noise;
             state_.positions(2 * i + 1) = 0;
 
             double side = (dist(rng) > 0) ? 1.0 : -1.0;
-            state_.trap_offsets(2 * i)     = side * (config_.amplitude / 2.0 + config_.epsilon);
+            state_.trap_offsets(2 * i)     = side * (config_.amplitude_per_bead[i] / 2.0 + config_.epsilon_per_bead[i]);
             state_.trap_offsets(2 * i + 1) = 0;
 
             if (i < N - 1) current_x += config_.inter_bead_distances[i];
@@ -159,12 +218,12 @@ void Simulation::initializeState() {
             state_.reference_pos(2 * i)     = pos.x();
             state_.reference_pos(2 * i + 1) = pos.y();
 
-            double noise = dist(rng) * config_.amplitude;
+            double noise = dist(rng) * config_.amplitude_per_bead[i];
             state_.positions(2 * i)     = pos.x() + noise;
             state_.positions(2 * i + 1) = pos.y();
 
             double side = (dist(rng) > 0) ? 1.0 : -1.0;
-            state_.trap_offsets(2 * i)     = side * (config_.amplitude / 2.0 + config_.epsilon);
+            state_.trap_offsets(2 * i)     = side * (config_.amplitude_per_bead[i] / 2.0 + config_.epsilon_per_bead[i]);
             state_.trap_offsets(2 * i + 1) = 0;
         }
     } else if (config_.geometry == GeometryType::RING) {
@@ -176,12 +235,12 @@ void Simulation::initializeState() {
             state_.reference_pos(2 * i)     = rx;
             state_.reference_pos(2 * i + 1) = ry;
 
-            double noise = dist(rng) * config_.amplitude;
+            double noise = dist(rng) * config_.amplitude_per_bead[i];
             state_.positions(2 * i)     = rx + noise;
             state_.positions(2 * i + 1) = ry;
 
             double side = (dist(rng) > 0) ? 1.0 : -1.0;
-            state_.trap_offsets(2 * i)     = side * (config_.amplitude / 2.0 + config_.epsilon);
+            state_.trap_offsets(2 * i)     = side * (config_.amplitude_per_bead[i] / 2.0 + config_.epsilon_per_bead[i]);
             state_.trap_offsets(2 * i + 1) = 0;
         }
     }
@@ -216,6 +275,14 @@ void Simulation::run() {
         axes << config_.angles[i] * 180.0 / M_PI << " "
              << state_.reference_pos(2*i) << " " << state_.reference_pos(2*i+1) << "\n";
     axes.close();
+    // Separate mobility metadata keeps the established .axes format readable.
+    std::ofstream hydro(dir_name + "/" + title + ".hydro");
+    hydro << std::setprecision(17) << "mobility "
+          << (config_.mobility == MobilityType::BLAKE ? "blake" :
+              config_.mobility == MobilityType::OSEEN ? "oseen" : "rotne_prager")
+          << "\nwall_height " << config_.wall_height
+          << "\nshear_x " << config_.shear_x << "\nshear_y " << config_.shear_y << "\n";
+    hydro.close();
 
     double time    = 0;
     int step_count = 0;
@@ -232,6 +299,7 @@ void Simulation::run() {
         if (step_count % config_.sampling_write == 0) {
             saveData(out_dat, frame, time);
             saveTraps(out_trap, frame);
+            engine_->computeForces(state_, time, forces_);
             saveForces(out_force, frame, time);
         }
 
@@ -265,10 +333,14 @@ void Simulation::step(double time) {
 
     VectorXd flow(2 * config_.num_beads);
     for (int i = 0; i < config_.num_beads; ++i) {
-        flow(2 * i)     = config_.velox;
-        flow(2 * i + 1) = config_.veloy;
+        flow(2 * i) = config_.velox + (config_.mobility == MobilityType::BLAKE ? config_.wall_height*config_.shear_x : 0);
+        flow(2 * i + 1) = config_.veloy + (config_.mobility == MobilityType::BLAKE ? config_.wall_height*config_.shear_y : 0);
     }
 
+    // Itô drift for the configuration-dependent constrained wall mobility.
+    // Deterministic centred differences avoid adding stochastic estimator noise.
+    if (config_.temperature > 0 && config_.mobility == MobilityType::BLAKE)
+        flow += KB * config_.temperature * engine_->mobilityDivergence(state_);
     state_.positions += (flow * config_.dt) + (tensor_ * forces_ * config_.dt) + noise_;
 }
 
@@ -280,10 +352,10 @@ void Simulation::activeTrapping() {
         double dx = (state_.positions.segment<2>(2*i)
                      - state_.reference_pos.segment<2>(2*i)).dot(e);
 
-        if (dx > (config_.amplitude / 2.0)) {
-            state_.trap_offsets.segment<2>(2*i) = -(config_.amplitude / 2.0 + config_.epsilon) * e;
-        } else if (dx < -(config_.amplitude / 2.0)) {
-            state_.trap_offsets.segment<2>(2*i) = (config_.amplitude / 2.0 + config_.epsilon) * e;
+        if (dx > (config_.amplitude_per_bead[i] / 2.0)) {
+            state_.trap_offsets.segment<2>(2*i) = -(config_.amplitude_per_bead[i] / 2.0 + config_.epsilon_per_bead[i]) * e;
+        } else if (dx < -(config_.amplitude_per_bead[i] / 2.0)) {
+            state_.trap_offsets.segment<2>(2*i) = (config_.amplitude_per_bead[i] / 2.0 + config_.epsilon_per_bead[i]) * e;
         }
     }
 }

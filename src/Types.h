@@ -41,6 +41,8 @@ enum class GeometryType {
 or 'structure' where we compile many arguments
 into a single place to make it easier to pass in
 the future.*/
+enum class MobilityType { OSEEN, ROTNE_PRAGER, BLAKE };
+
 struct SimulationConfig {
     /*scalar members*/
     int num_beads; /*Number of beads in array*/
@@ -77,8 +79,14 @@ struct SimulationConfig {
     std::vector<int> signal_beads; /*allows for signals on each bead*/
 
     GeometryType geometry; /*remember arrangement choice we make*/
-    bool use_rotne_prager = true;/*rotne-prager mobility calc as default, can overwrite 
-                                 to oseen in command line*/
+    MobilityType mobility = MobilityType::ROTNE_PRAGER;
+    // Fixed bead-centre height above z=0. Used only by Blake mode.
+    double wall_height = 6.0;
+    // Wall-compatible imposed shear: u(z)=z*(shear_x,shear_y,0).
+    double shear_x = 0.0, shear_y = 0.0;
+    // Scalars above are defaults; these resolved arrays govern each trap.
+    std::vector<double> alpha_per_bead, beta_per_bead;
+    std::vector<double> amplitude_per_bead, epsilon_per_bead;
 };
 
 /*this structure stores the current state of the system, 

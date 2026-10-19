@@ -2,6 +2,7 @@
 #include <cmath>
 #include <algorithm>
 #include <iostream>
+#include <stdexcept>
 
 namespace modern {
 
@@ -9,6 +10,10 @@ PhysicsEngine::PhysicsEngine(const SimulationConfig& config)
     : config_(config), rng_(std::random_device{}()), dist_(0.0, 1.0) {}
 
 void PhysicsEngine::computeHydrodynamicTensor(const State& state, MatrixXd& tensor) const {
+    if (config_.mobility == MobilityType::BLAKE) {
+        tensor = wallMobility(state);
+        return;
+    }
     int N    = config_.num_beads;
     double a = config_.bead_radius;
     double zeta     = 6.0 * M_PI * config_.viscosity * a;
@@ -24,16 +29,17 @@ void PhysicsEngine::computeHydrodynamicTensor(const State& state, MatrixXd& tens
                 Vector2d dp = state.positions.segment<2>(2 * q) - state.positions.segment<2>(2 * p);
                 double r2   = dp.squaredNorm();
                 double r    = std::sqrt(r2);
+                if (!(r > 0)) throw std::runtime_error("Coincident beads");
 
                 Matrix2d I       = Matrix2d::Identity();
                 Matrix2d unit_rr = (dp * dp.transpose()) / r2;
                 Matrix2d D;
 
-                if (config_.use_rotne_prager) {
+                if (config_.mobility == MobilityType::ROTNE_PRAGER) {
                     if (r >= 2 * a) {
                         D = (I + unit_rr + (I - 3.0 * unit_rr) * (2.0 * a * a / (3.0 * r2))) * (3.0 * a / (4.0 * zeta * r));
                     } else {
-                        D = (I * (1.0 - 9.0 * r / (32.0 * a)) + unit_rr * (3.0 / (32.0 * a * r))) * inv_zeta;
+                        D = (I * (1.0 - 9.0 * r / (32.0 * a)) + unit_rr * (3.0 * r / (32.0 * a))) * inv_zeta;
                     }
                 } else {
                     D = (I + unit_rr) * (1.0 / (8.0 * M_PI * config_.viscosity * r));
@@ -46,6 +52,8 @@ void PhysicsEngine::computeHydrodynamicTensor(const State& state, MatrixXd& tens
 
 void PhysicsEngine::computeCholesky(const MatrixXd& tensor, MatrixXd& diffusion) const {
     Eigen::LLT<MatrixXd> llt(tensor);
+    if (!tensor.allFinite() || llt.info() != Eigen::Success)
+        throw std::runtime_error("Mobility is not positive definite; check separation, height and timestep");
     diffusion = llt.matrixL();
 }
 
@@ -87,8 +95,8 @@ void PhysicsEngine::computeForces(const State& state, double time, VectorXd& for
         double ky_eff = -config_.ky_per_bead[i] * H;
 
         double fx = 0, fy = 0;
-        if (std::abs(dx) > 1e-18) fx = kx_eff * dx * config_.alpha * std::pow(std::abs(dx), config_.alpha - 2);
-        if (std::abs(dy) > 1e-18) fy = ky_eff * dy * config_.beta  * std::pow(std::abs(dy), config_.beta  - 2);
+        if (std::abs(dx) > 1e-18) fx = kx_eff * dx * config_.alpha_per_bead[i] * std::pow(std::abs(dx), config_.alpha_per_bead[i] - 2);
+        if (std::abs(dy) > 1e-18) fy = ky_eff * dy * config_.beta_per_bead[i] * std::pow(std::abs(dy), config_.beta_per_bead[i] - 2);
 
         if (std::find(config_.signal_beads.begin(), config_.signal_beads.end(), i) != config_.signal_beads.end())
             // Matched longitudinal forcing at either driven endpoint.
@@ -103,4 +111,86 @@ double PhysicsEngine::getNormalRandom() {
     return dist_(rng_);
 }
 
+} // namespace modern
+
+namespace modern {
+// Blake (1971), as written in Bruot & Cicuta (2016), equations (5)-(6).
+// This is the point-force wall Green function, not finite-size RPY-Blake.
+Matrix3d PhysicsEngine::blakePair(const Vector3d& target, const Vector3d& source) const {
+    const Vector3d r = target - source;
+    Vector3d image = source; image.z() = -source.z();
+    const Vector3d R = target - image;
+    const double d = r.norm(), D = R.norm(), h = source.z();
+    if (!(d > 0 && D > 0)) throw std::runtime_error("Singular Blake pair");
+    Matrix3d result;
+    for (int a=0; a<3; ++a) for (int b=0; b<3; ++b) {
+        const double delta = a==b ? 1.0 : 0.0;
+        const double sign = b==2 ? -1.0 : 1.0;
+        const double stokes = delta/d + r[a]*r[b]/std::pow(d,3);
+        const double reflected = delta/D + R[a]*R[b]/std::pow(D,3);
+        const double source_doublet = sign*(delta/std::pow(D,3)-3*R[a]*R[b]/std::pow(D,5));
+        const double stokes_doublet = sign*(-(a==2 ? R[b] : 0.0)/std::pow(D,3)
+            + delta*R.z()/std::pow(D,3) + (b==2 ? R[a] : 0.0)/std::pow(D,3)
+            - 3*R[a]*R.z()*R[b]/std::pow(D,5));
+        result(a,b) = (stokes-reflected+2*h*h*source_doublet-2*h*stokes_doublet)
+                       /(8*M_PI*config_.viscosity);
+    }
+    return result;
+}
+
+MatrixXd PhysicsEngine::wallMobility(const State& state) const {
+    const int N = config_.num_beads;
+    const double a = config_.bead_radius, h = config_.wall_height;
+    const double ratio = a/h, mu = 1/(6*M_PI*config_.viscosity*a);
+    // Self terms from the review Eq. (4). Valid away from wall contact;
+    // pair terms remain point-force level. Do not use this as lubrication theory.
+    const double parallel = mu*(1-9*ratio/16+std::pow(ratio,3)/8-std::pow(ratio,5)/16);
+    const double normal = mu*(1-9*ratio/8+std::pow(ratio,3)/2-std::pow(ratio,5)/8);
+    MatrixXd full = MatrixXd::Zero(3*N,3*N);
+    for(int i=0;i<N;++i) {
+        full(3*i,3*i)=parallel; full(3*i+1,3*i+1)=parallel; full(3*i+2,3*i+2)=normal;
+        for(int j=i+1;j<N;++j) {
+            Vector3d ri(state.positions(2*i),state.positions(2*i+1),h);
+            Vector3d rj(state.positions(2*j),state.positions(2*j+1),h);
+            // Explicit far-field domain guard, not an overlap regularisation.
+            if ((ri-rj).norm() < 4*a)
+                throw std::runtime_error("Blake point-force mode requires instantaneous pair distance >= 4 radii");
+            Matrix3d block = blakePair(ri,rj);
+            full.block<3,3>(3*i,3*j)=block;
+            full.block<3,3>(3*j,3*i)=block.transpose();
+        }
+    }
+    // Eliminate the normal constraint forces from vz=0:
+    // M_eff = M_pp - M_pz M_zz^{-1} M_zp (Schur complement).
+    MatrixXd pp(2*N,2*N), pz(2*N,N), zz(N,N);
+    for(int i=0;i<N;++i) for(int j=0;j<N;++j) {
+        pp.block<2,2>(2*i,2*j)=full.block<2,2>(3*i,3*j);
+        pz.block<2,1>(2*i,j)=full.block<2,1>(3*i,3*j+2);
+        zz(i,j)=full(3*i+2,3*j+2);
+    }
+    Eigen::LLT<MatrixXd> normal_solver(zz);
+    if (!full.allFinite() || normal_solver.info()!=Eigen::Success)
+        throw std::runtime_error("Invalid normal wall mobility");
+    MatrixXd effective = pp - pz*normal_solver.solve(pz.transpose());
+    effective = (0.5*(effective+effective.transpose())).eval();
+    Eigen::LLT<MatrixXd> check(effective);
+    if (!effective.allFinite() || check.info()!=Eigen::Success)
+        throw std::runtime_error("Non-positive constrained wall mobility");
+    return effective;
+}
+
+VectorXd PhysicsEngine::mobilityDivergence(const State& state) const {
+    // Sum_j d M_ij/d q_j in planar coordinates, with fixed height and angles.
+    // Cost is 2*(2N) mobility evaluations per thermal step. Check convergence
+    // of dt for scientific runs; the numerical derivative uses a relative scale.
+    const int size = state.positions.size();
+    const double delta = 1e-5*config_.bead_radius;
+    VectorXd divergence = VectorXd::Zero(size);
+    for(int j=0;j<size;++j) {
+        State plus=state, minus=state;
+        plus.positions(j)+=delta; minus.positions(j)-=delta;
+        divergence += (wallMobility(plus).col(j)-wallMobility(minus).col(j))/(2*delta);
+    }
+    return divergence;
+}
 } // namespace modern
