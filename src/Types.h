@@ -72,6 +72,8 @@ struct SimulationConfig {
     std::vector<Vector2d> initial_positions; /*allow for ARBITRARY 'reference' positions*/
     std::vector<double> kx_per_bead; /*allow for nonuniform kx*/
     std::vector<double> ky_per_bead; /*allow for nonuniform ky*/
+    // Fixed local oscillation directions, in radians; legacy inputs use zero.
+    std::vector<double> angles;
     std::vector<int> signal_beads; /*allows for signals on each bead*/
 
     GeometryType geometry; /*remember arrangement choice we make*/

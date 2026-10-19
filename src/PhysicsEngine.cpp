@@ -60,9 +60,15 @@ void PhysicsEngine::computeForces(const State& state, double time, VectorXd& for
     double i0 = (N - 1) / 2.0;
 
     for (int i = 0; i < N; ++i) {
-        double dx = state.positions(2 * i)     - (state.reference_pos(2 * i)     + state.trap_offsets(2 * i));
-        double dy = state.positions(2 * i + 1) - (state.reference_pos(2 * i + 1) + state.trap_offsets(2 * i + 1));
-
+        // Rotate displacement into the bead's own trap frame. kx/alpha now
+        // act longitudinally and ky/beta transversely; H is unchanged.
+        const double theta = config_.angles[i];
+        const Vector2d e(std::cos(theta), std::sin(theta));
+        const Vector2d n(-std::sin(theta), std::cos(theta));
+        const Vector2d delta = state.positions.segment<2>(2*i)
+            - state.reference_pos.segment<2>(2*i) - state.trap_offsets.segment<2>(2*i);
+        double dx = delta.dot(e);
+        double dy = delta.dot(n);
         double distance_ratio = 1.0;
         if (config_.geometry == GeometryType::CHAIN && N > 1) {
             double current_dist = config_.base_distance;
@@ -85,10 +91,11 @@ void PhysicsEngine::computeForces(const State& state, double time, VectorXd& for
         if (std::abs(dy) > 1e-18) fy = ky_eff * dy * config_.beta  * std::pow(std::abs(dy), config_.beta  - 2);
 
         if (std::find(config_.signal_beads.begin(), config_.signal_beads.end(), i) != config_.signal_beads.end())
+            // Matched longitudinal forcing at either driven endpoint.
             fx += signal;
 
-        forces(2 * i)     = fx;
-        forces(2 * i + 1) = fy;
+        // Mobility and noise remain in laboratory coordinates.
+        forces.segment<2>(2*i) = fx * e + fy * n;
     }
 }
 

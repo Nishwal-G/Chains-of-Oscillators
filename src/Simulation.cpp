@@ -34,7 +34,7 @@ void Simulation::parseInput(const std::string& input_file) {
     double val;
     while (iss >> val) p.push_back(val);
 
-    if (p.size() < 21) throw std::runtime_error("Not enough parameters in input file");
+    if (p.size() < 22) throw std::runtime_error("Not enough parameters in input file");
 
     config_.num_beads       = static_cast<int>(p[0]);
     config_.amplitude       = p[1];
@@ -61,7 +61,31 @@ void Simulation::parseInput(const std::string& input_file) {
     config_.geometry        = geometry_arg_;
 
     int N = config_.num_beads;
+    if (N < 1) throw std::runtime_error("num_beads must be positive");
+    // Optional second-line extension avoids changing any legacy numeric columns.
+    // Angles are supplied in degrees, converted once to radians internally.
+    config_.angles.assign(N, 0.0);
+    bool seen_angles = false;
+    while (std::getline(is, line)) {
+        line = line.substr(0, line.find('#'));
+        std::istringstream extra(line);
+        std::string key;
+        if (!(extra >> key)) continue;
+        if (key != "angles_deg" || seen_angles)
+            throw std::runtime_error("Expected one optional angles_deg line");
+        seen_angles = true;
+        for (int i = 0; i < N; ++i) {
+            double degrees;
+            if (!(extra >> degrees) || !std::isfinite(degrees))
+                throw std::runtime_error("angles_deg needs N finite values");
+            config_.angles[i] = degrees * M_PI / 180.0;
+        }
+        std::string excess;
+        if (extra >> excess) throw std::runtime_error("Too many angles_deg values");
+    }
     int current = 22;
+    if (config_.geometry == GeometryType::CHAIN && p.size() < size_t(22 + N - 1))
+        throw std::runtime_error("Missing chain distances");
 
     if (config_.geometry == GeometryType::CHAIN) {
         for (int i = 0; i < N - 1; ++i) config_.inter_bead_distances.push_back(p[current++]);
@@ -74,6 +98,8 @@ void Simulation::parseInput(const std::string& input_file) {
 
     if (config_.geometry == GeometryType::ARBITRARY) {
         for (int i = 0; i < N; ++i) {
+            if (current + 1 >= static_cast<int>(p.size()))
+                throw std::runtime_error("Missing arbitrary reference coordinates");
             double x = p[current++];
             double y = p[current++];
             config_.initial_positions.push_back({x, y});
@@ -159,6 +185,15 @@ void Simulation::initializeState() {
             state_.trap_offsets(2 * i + 1) = 0;
         }
     }
+    // Geometry fixes the reference positions; orientation independently fixes
+    // the stroke direction. Rotate existing random longitudinal initial states.
+    for (int i = 0; i < N; ++i) {
+        const Vector2d e(std::cos(config_.angles[i]), std::sin(config_.angles[i]));
+        const double q = state_.positions(2*i) - state_.reference_pos(2*i);
+        const double offset = state_.trap_offsets(2*i);
+        state_.positions.segment<2>(2*i) = state_.reference_pos.segment<2>(2*i) + q * e;
+        state_.trap_offsets.segment<2>(2*i) = offset * e;
+    }
 }
 
 void Simulation::run() {
@@ -172,6 +207,15 @@ void Simulation::run() {
     std::ofstream out_dat(dir_name + "/" + title + ".dat");
     std::ofstream out_trap(dir_name + "/" + title + ".trap");
     std::ofstream out_force(dir_name + "/" + title + ".forces");
+
+    // Sidecar travels with the .dat file; old trajectory columns stay unchanged.
+    // Python uses these angles for longitudinal phase and spectrum analysis.
+    std::ofstream axes(dir_name + "/" + title + ".axes");
+    axes << "# angle_degrees reference_x reference_y\n" << std::setprecision(17);
+    for (int i = 0; i < config_.num_beads; ++i)
+        axes << config_.angles[i] * 180.0 / M_PI << " "
+             << state_.reference_pos(2*i) << " " << state_.reference_pos(2*i+1) << "\n";
+    axes.close();
 
     double time    = 0;
     int step_count = 0;
@@ -231,12 +275,15 @@ void Simulation::step(double time) {
 void Simulation::activeTrapping() {
     int N = config_.num_beads;
     for (int i = 0; i < N; ++i) {
-        double dx = state_.positions(2 * i) - state_.reference_pos(2 * i);
+        // Switch on displacement ALONG the local stroke, not laboratory x.
+        const Vector2d e(std::cos(config_.angles[i]), std::sin(config_.angles[i]));
+        double dx = (state_.positions.segment<2>(2*i)
+                     - state_.reference_pos.segment<2>(2*i)).dot(e);
 
         if (dx > (config_.amplitude / 2.0)) {
-            state_.trap_offsets(2 * i) = -(config_.amplitude / 2.0 + config_.epsilon);
+            state_.trap_offsets.segment<2>(2*i) = -(config_.amplitude / 2.0 + config_.epsilon) * e;
         } else if (dx < -(config_.amplitude / 2.0)) {
-            state_.trap_offsets(2 * i) = (config_.amplitude / 2.0 + config_.epsilon);
+            state_.trap_offsets.segment<2>(2*i) = (config_.amplitude / 2.0 + config_.epsilon) * e;
         }
     }
 }
