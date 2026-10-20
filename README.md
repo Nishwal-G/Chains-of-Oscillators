@@ -87,8 +87,8 @@ selects the hydrodynamic approximation:
 All layouts support a fixed oscillation angle for each bead. Without an angle
 line, traps still switch along global x. Reference geometry and stroke direction
 are independent: a chain can lie along x while its beads oscillate at different
-angles. Ring and arbitrary layouts are not exposed by the Python search; the
-angle-update end-to-end checks used chain geometry.
+angles. Python now supports explicit planar coordinates (including ring layouts);
+see [Computing experiments](COMPUTING.md). Legacy CLI geometry flags remain available.
 Oseen is a far-field approximation and can become unsuitable at close separation.
 Do not infer a guarantee of positive-definite mobility for every configuration
 from the presence of the `-R` option; overlapping/coincident beads and numerical
@@ -302,10 +302,10 @@ optimisation with a diagnostic; it is never converted to a zero score. In a
 parameter diagram it is recorded as a missing measurement so other points can
 continue. The best candidate is not automatically revalidated on fresh repeats.
 
-`--seed` seeds Python proposals only. C++ still seeds initial conditions and
-thermal noise independently; exact trajectory reproducibility would require a
-future C++ seed parameter. There is no claim of common random numbers between
-forward/backward/control experiments.
+`--seed` seeds Python proposals. Use `--set seed 12345` to seed the C++
+simulator too: replicate i uses seed 12345+i, shared across its matched cases.
+The default simulator seed=-1 preserves legacy random runs. See COMPUTING.md
+for seed semantics and how to validate on a fresh ensemble.
 
 Bayesian warm start accepts a **new-pipeline** `objective_evaluations.jsonl`:
 
@@ -648,7 +648,7 @@ At finite temperature, noise covariance is `2*kBT*M_eff*dt`, and the Itô drift
 coordinates, with derivative step `1e-5*bead_radius`. This requires 4N extra
 wall-mobility evaluations per integration step and is substantially slower.
 The legacy unbounded integration is retained; this is not a new general audit
-of its planar Brownian approximation. Initial conditions remain random at T=0.
+of its planar Brownian approximation. Initial conditions remain random at T=0 unless a simulator seed is supplied.
 
 Uniform `velox`/`veloy` are rejected in Blake mode. Instead specify `shear_x`
 and/or `shear_y` (inverse time), giving imposed flow
@@ -678,9 +678,10 @@ are retained model features, not refactoring side effects. Check timestep and
 observation-time convergence across any expanded search range, especially near
 steep/singular force profiles and locking boundaries.
 
-The information-transfer mode (phase jump, response delay, message transmission)
-is deliberately not implemented: the current C++ signal cannot express those
-protocols. It requires an explicit future simulator extension. Per-bead alpha is now supported through `alpha_per_bead`; selecting global
+Independent timed drives now support pulses and programmed phase changes.
+Causal response-delay estimation and message-decoding benchmarks are not yet
+implemented; the phase analysis remains offline. Per-bead alpha is supported
+through `alpha_per_bead`; selecting global
 `alpha` intentionally broadcasts one value to every bead.
 
 The angle extension adds fixed in-plane directions only: it does not add
@@ -758,3 +759,25 @@ analysis settings alongside reported results. The pipeline stores configuration
 and code/executable hashes with its records. Consult `TESTING_WALL.md` for the scope
 of the delivered validation; short smoke tests are not substitutes for timestep,
 repeat-count and observation-time convergence checks.
+
+## 11. Controlled junctions, logic and memory experiments
+
+The same simulator now accepts arbitrary planar layouts, named bead groups and
+independent timed drives. Existing templates and diode objectives retain their
+behaviour. New `direct_traps=true` configurations use the specified per-bead
+potential coefficients without the legacy index/spacing multiplier.
+
+See [COMPUTING.md](COMPUTING.md) for fields, physical meaning, exact scores,
+commands, seed behaviour and limitations. `templates/computing/` contains a
+junction, a pulsed-control version, a ring, experiment protocols and search bounds.
+These are starting experiments, not optimised or experimentally validated devices.
+
+```bash
+python analysis/experiments.py --config templates/computing/junction.json --experiment templates/computing/control.json --runs 3 --cores 3 --keep --out results/control
+python analysis/optimisation.py --config templates/computing/junction.json --experiment templates/computing/control.json --search templates/computing/search.json --method metropolis --iterations 10 --runs 3 --cores 3 --out results/control_search
+```
+
+Both optimisers reuse the existing search, run, audit and checkpoint machinery.
+Only the chosen experiment and score differ. New search coordinates include
+`reference_x[2]`, `reference_y[2]`, and `drives[1].amplitude`; see the added section
+in search_help.txt. Rebuild the C++ executable after applying the update.
