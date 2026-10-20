@@ -77,6 +77,8 @@ class Evaluator:
 
     def _replicate(self, config, folder):
         p = config.values
+        if p["drives"] is not None:
+            raise ValueError("Legacy diode evaluation uses F0/T_signal; use --experiment for independent drives")
         if p["T_signal"] < 20 * p["dt"]:
             raise ValueError("Need at least 20 integration steps per signal period.")
         if p["total_time"] - self.start < 2 * p["T_signal"] + 2 * p["dt"]:
@@ -119,6 +121,8 @@ class Evaluator:
     def evaluate(self, config):
         key = uuid.uuid4().hex
         folder = self.output / "simulation_work" / key
+        # A fixed base seed produces reproducible but distinct replicates. Each
+        # replicate uses matched random initial conditions across its cases.
         record = {
             "evaluation_id": key,
             "configuration": config.values,
@@ -128,7 +132,7 @@ class Evaluator:
         try:
             with ThreadPoolExecutor(max_workers=min(self.cores, self.runs)) as pool:
                 futures = [
-                    pool.submit(self._replicate, config, folder / f"replicate_{i}")
+                    pool.submit(self._replicate, config if config.values["seed"] < 0 else config.updated(seed=(config.values["seed"] + i) % 2**32), folder / f"replicate_{i}")
                     for i in range(self.runs)
                 ]
                 replicates = [future.result() for future in futures]
@@ -136,8 +140,7 @@ class Evaluator:
             record.update(
                 status="ok",
                 replicates=replicates,
-                forward_R=float(np.mean([r["forward_R"] for r in replicates])),
-                backward_R=float(np.mean([r["backward_R"] for r in replicates])),
+                **self.summarise(replicates),
                 score=float(np.mean(scores)),
                 score_sem=(
                     float(np.std(scores, ddof=1) / np.sqrt(self.runs))
@@ -157,6 +160,11 @@ class Evaluator:
         self._audit(record)
         return record
 
+    def summarise(self, replicates):
+        """Protocol hook; execution, audit, repeats and cleanup stay shared."""
+        return {key: float(np.mean([r[key] for r in replicates]))
+                for key in ("forward_R", "backward_R")}
+
     def _audit(self, record):
         with (self.output / "objective_evaluations.jsonl").open("a") as stream:
             stream.write(json.dumps(json_value(record), allow_nan=False) + "\n")
@@ -175,10 +183,14 @@ def plot_history(history, space, output):
     if history["method"] == "metropolis":
         accepted = [i for i, r in enumerate(records) if r.get("accepted")]
         axes[0].scatter(accepted, scores[accepted], s=15, label="Accepted states")
-    axes[0].set_ylabel("Receiver R difference")
-    axes[1].plot([r["forward_R"] for r in records], label="Forward receiver")
-    axes[1].plot([r["backward_R"] for r in records], label="Backward receiver")
-    axes[1].set_ylabel("Phase consistency R")
+    axes[0].set_ylabel("Objective score")
+    if "forward_R" in records[0]:
+        axes[1].plot([r["forward_R"] for r in records], label="Forward receiver")
+        axes[1].plot([r["backward_R"] for r in records], label="Backward receiver")
+        axes[1].set_ylabel("Phase consistency R")
+    else:
+        axes[1].plot([r.get("score_sem") or 0 for r in records], label="Repeat SEM")
+        axes[1].set_ylabel("Score uncertainty")
     for i, name in enumerate(space.labels):
         axes[2].plot(space.normalise(x)[:, i], label=name)
     axes[2].set_ylabel("Parameter (fraction of bounds)")
@@ -198,10 +210,16 @@ def plot_history(history, space, output):
     for i, name in enumerate(space.labels):
         axes[i, 0].plot(x[:, i])
         axes[i, 0].set_ylabel(name)
-    gaps = np.array([r["configuration"]["distances"] for r in records])
-    for i in range(gaps.shape[1]):
-        axes[-1, 0].plot(gaps[:, i], label=f"gap {i}")
-    axes[-1, 0].set_ylabel("Reference gap")
+    if records[0]["configuration"].get("reference_x"):
+        from simulation import Configuration
+        distances = np.array([Configuration(r["configuration"]).pair_distances() for r in records])
+        axes[-1, 0].plot(distances.min(axis=1), label="Closest pair")
+        axes[-1, 0].set_ylabel("Minimum reference separation")
+    else:
+        gaps = np.array([r["configuration"]["distances"] for r in records])
+        for i in range(gaps.shape[1]):
+            axes[-1, 0].plot(gaps[:, i], label=f"gap {i}")
+        axes[-1, 0].set_ylabel("Reference gap")
     axes[-1, 0].legend(ncol=3)
     fig.tight_layout()
     fig.savefig(output / "parameters.png", dpi=150)
@@ -250,7 +268,13 @@ def optimise(args):
         raise ValueError("Invalid search settings.")
     output = Path(args.out)
     output.mkdir(parents=True, exist_ok=False)
-    evaluator = Evaluator(
+    evaluator_class = Evaluator
+    extra = {}
+    if args.experiment:
+        from experiments import ExperimentEvaluator
+        evaluator_class = ExperimentEvaluator
+        extra["experiment"] = json.loads(Path(args.experiment).read_text())
+    evaluator = evaluator_class(
         args.exe,
         output,
         args.runs,
@@ -259,6 +283,7 @@ def optimise(args):
         args.keep,
         hysteresis=args.hysteresis,
         slip_hysteresis=args.slip_hysteresis,
+        **extra,
     )
     rng = np.random.default_rng(args.seed)
     history = {
@@ -289,10 +314,7 @@ def optimise(args):
             c = Configuration(config)
             vector = np.concatenate([np.atleast_1d(c.get(k)) for k in specification])
             rebuilt = space.configuration(vector)
-            if any(
-                not np.allclose(rebuilt.values[k], c.values[k], rtol=1e-12, atol=1e-12)
-                for k in c.values
-            ):
+            if json_value(rebuilt.values) != json_value(c.values):
                 raise ValueError("Warm-start fixed parameters differ.")
             observations.append({**record, "vector": vector.tolist()})
     best = max(observations, key=lambda r: r["score"]) if observations else None
@@ -414,6 +436,7 @@ def main():
     p.add_argument("--method", choices=["metropolis", "bayesian"], default="metropolis")
     p.add_argument("--config", default="templates/6beads.input")
     p.add_argument("--search", default="search.json")
+    p.add_argument("--experiment", help="Experiment JSON; omitted preserves the existing diode objective")
     p.add_argument(
         "--set",
         nargs=2,
@@ -442,7 +465,7 @@ def main():
         "--seed",
         type=int,
         default=None,
-        help="Python search seed; C++ still randomises each simulation.",
+        help="Python proposal seed. Use --set seed INTEGER to seed simulator repeats.",
     )
     p.add_argument(
         "--warm-start",
