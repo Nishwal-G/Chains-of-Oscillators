@@ -1,0 +1,41 @@
+{
+  "kind": "memory",
+  "output": "output",
+  "reference": "input",
+  "ring": "ring",
+  "period": 0.184715,
+  "cases": [
+    {
+      "name": "write_zero",
+      "window": [
+        8,
+        11
+      ],
+      "overrides": {
+        "drives[0].phase": 0
+      },
+      "windows": [
+        [
+          5,
+          7
+        ]
+      ]
+    },
+    {
+      "name": "write_one",
+      "window": [
+        8,
+        11
+      ],
+      "overrides": {
+        "drives[0].phase": 3.141592653589793
+      },
+      "windows": [
+        [
+          5,
+          7
+        ]
+      ]
+    }
+  ]
+}

@@ -1,0 +1,92 @@
+{
+  "kind": "control",
+  "output": "output",
+  "reference": "input",
+  "period": 0.184715,
+  "cases": [
+    {
+      "name": "neither",
+      "scales": [
+        0,
+        0
+      ],
+      "window": [
+        5,
+        7
+      ],
+      "windows": [
+        [
+          1.5,
+          3.5
+        ],
+        [
+          9,
+          11
+        ]
+      ]
+    },
+    {
+      "name": "input",
+      "scales": [
+        1,
+        0
+      ],
+      "window": [
+        5,
+        7
+      ],
+      "windows": [
+        [
+          1.5,
+          3.5
+        ],
+        [
+          9,
+          11
+        ]
+      ]
+    },
+    {
+      "name": "control",
+      "scales": [
+        0,
+        1
+      ],
+      "window": [
+        5,
+        7
+      ],
+      "windows": [
+        [
+          1.5,
+          3.5
+        ],
+        [
+          9,
+          11
+        ]
+      ]
+    },
+    {
+      "name": "both",
+      "scales": [
+        1,
+        1
+      ],
+      "window": [
+        5,
+        7
+      ],
+      "windows": [
+        [
+          1.5,
+          3.5
+        ],
+        [
+          9,
+          11
+        ]
+      ]
+    }
+  ]
+}

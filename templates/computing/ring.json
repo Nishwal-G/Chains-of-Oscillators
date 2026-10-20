@@ -1,0 +1,149 @@
+{
+  "configuration": {
+    "num_beads": 6.0,
+    "amplitude": 3.0,
+    "base_distance": 12.0,
+    "bead_radius": 1.0,
+    "dt": 5e-05,
+    "total_time": 12,
+    "viscosity": 0.006,
+    "alpha": 0.5,
+    "kx": 10,
+    "beta": 2,
+    "ky": 10,
+    "temperature": 0,
+    "sampling_feedback": 50.0,
+    "sampling_write": 200.0,
+    "epsilon": 0.3,
+    "velox": 0.0,
+    "ks": 0.0,
+    "fl0": 0.25,
+    "veloy": 0.0,
+    "F0": 2.5,
+    "T_signal": 0.184715,
+    "default_lambda": 0,
+    "distances": [
+      12.0,
+      12.0,
+      12.0,
+      12.0,
+      12.0
+    ],
+    "lambdas": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "kx_per_bead": [
+      10.0,
+      10.0,
+      10.0,
+      10.0,
+      10.0,
+      10.0
+    ],
+    "ky_per_bead": [
+      10.0,
+      10.0,
+      10.0,
+      10.0,
+      10.0,
+      10.0
+    ],
+    "signal_beads": [
+      0.0
+    ],
+    "mobility": "rotne_prager",
+    "wall_height": 6.0,
+    "shear_x": 0.0,
+    "shear_y": 0.0,
+    "angles_deg": [
+      90.0,
+      150.0,
+      210.0,
+      270.0,
+      330.0,
+      390.00000000000006
+    ],
+    "alpha_per_bead": [
+      0.5,
+      0.5,
+      0.5,
+      0.5,
+      0.5,
+      0.5
+    ],
+    "beta_per_bead": [
+      2.0,
+      2.0,
+      2.0,
+      2.0,
+      2.0,
+      2.0
+    ],
+    "amplitude_per_bead": [
+      3.0,
+      3.0,
+      3.0,
+      3.0,
+      3.0,
+      3.0
+    ],
+    "epsilon_per_bead": [
+      0.3,
+      0.3,
+      0.3,
+      0.3,
+      0.3,
+      0.3
+    ],
+    "drives": [
+      {
+        "targets": "input",
+        "amplitude": 2.5,
+        "period": 0.184715,
+        "phase": 0,
+        "start": 2,
+        "stop": 4,
+        "waveform": "sine"
+      }
+    ],
+    "reference_x": [
+      12.0,
+      6.000000000000002,
+      -5.999999999999997,
+      -12.0,
+      -6.000000000000005,
+      6.000000000000002
+    ],
+    "reference_y": [
+      0.0,
+      10.392304845413264,
+      10.392304845413264,
+      1.4695761589768238e-15,
+      -10.39230484541326,
+      -10.392304845413264
+    ],
+    "groups": {
+      "input": [
+        0
+      ],
+      "output": [
+        3
+      ],
+      "ring": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ]
+    },
+    "direct_traps": true,
+    "seed": 12345
+  }
+}
