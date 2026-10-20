@@ -21,13 +21,25 @@ from bead_analysis import MultiBeadCoherenceAnalyzer
 
 def validate_experiment(spec):
     """Small explicit schema, so typos cannot silently change an objective."""
-    allowed = {"kind", "cases", "output", "reference", "period", "threshold", "ring"}
+    allowed = {"kind", "cases", "output", "reference", "period", "threshold", "ring", "objective", "off_max", "on_min"}
     if set(spec) - allowed or spec.get("kind") not in ("control", "logic", "memory"):
         raise ValueError("Experiment kind must be control, logic or memory; unknown keys are rejected")
     if not np.isfinite(spec.get("period", 0)) or spec["period"] <= 0:
         raise ValueError("Specify a positive diagnostic period")
     if not 0 < spec.get("threshold", .8) < 1:
         raise ValueError("threshold must lie between zero and one")
+    # New scoring is opt-in: existing protocols retain their original objective.
+    objective = spec.get("objective", "contrast")
+    if objective not in ("contrast", "switch"):
+        raise ValueError("objective must be contrast or switch")
+    if spec["kind"] != "control" and any(k in spec for k in ("objective", "off_max", "on_min")):
+        raise ValueError("objective/off_max/on_min apply only to control experiments")
+    if objective != "switch" and any(k in spec for k in ("off_max", "on_min")):
+        raise ValueError("off_max/on_min require objective=switch")
+    if objective == "switch":
+        off, on = spec.get("off_max", .3), spec.get("on_min", .9)
+        if not np.all(np.isfinite([off, on])) or not 0 <= off < on <= 1:
+            raise ValueError("Require 0 <= off_max < on_min <= 1")
     cases = spec.get("cases", [])
     if not cases or len({c["name"] for c in cases}) != len(cases):
         raise ValueError("Cases need unique names")
@@ -51,6 +63,28 @@ def validate_experiment(spec):
         raise ValueError("The initial two-input logic protocol needs four truth-table cases")
     if spec["kind"] == "memory" and len(cases) != 2:
         raise ValueError("Memory comparison needs exactly two writing protocols")
+
+
+def control_score(rows, spec):
+    """Score each matched repeat before averaging; never threshold mean bars.
+
+    A switch must have low input-only R AND high both-drives R. The hinge
+    penalties stop rewarding a target once reached. Retain the existing
+    control-only entrainment penalty; zero is the best possible switch score.
+    These are design targets for phase coherence, not proof of information flow.
+    """
+    off_r, on_r = rows["input"]["R"], rows["both"]["R"]
+    penalty = max(0.0, rows["control"]["R"] - rows["neither"]["R"])
+    if spec.get("objective", "contrast") == "contrast":
+        return on_r - off_r - penalty, {}
+    off, on = spec.get("off_max", .3), spec.get("on_min", .9)
+    off_loss, on_loss = max(0.0, off_r-off), max(0.0, on-on_r)
+    return -(off_loss + on_loss + penalty), {
+        "off_loss": off_loss, "on_loss": on_loss,
+        "control_penalty": penalty,
+        # Success refers to the two switch targets, independently of penalty.
+        "switch_success": bool(off_r <= off and on_r >= on),
+    }
 
 
 def pair_metrics(analyser, bead, reference, start, stop, period, slip_hysteresis):
@@ -121,7 +155,13 @@ class ExperimentEvaluator(Evaluator):
         self.protocol["code_sha256"]["experiments.py"] = fingerprint(__file__)
 
     def summarise(self, replicates):
-        # The parent already supplies mean score and its SEM for every protocol.
+        # Report individual-repeat reliability separately from the mean score.
+        if self.experiment.get("objective") == "switch":
+            successes = sum(r["switch_success"] for r in replicates)
+            return {"switch_successes": successes, "switch_trials": len(replicates),
+                    "switch_success_fraction": successes / len(replicates),
+                    **{key: float(np.mean([r[key] for r in replicates]))
+                       for key in ("off_loss", "on_loss", "control_penalty")}}
         return {}
 
     def _replicate(self, config, folder):
@@ -182,9 +222,9 @@ class ExperimentEvaluator(Evaluator):
                 row["windows"].append(diagnostic)
             rows[case["name"]] = row
             save_json(folder/case["name"]/"metrics.json", row)
+        diagnostics = {}
         if spec["kind"] == "control":
-            # Reward opening the input path; penalise control-only entrainment.
-            score = rows["both"]["R"]-rows["input"]["R"]-max(0, rows["control"]["R"]-rows["neither"]["R"])
+            score, diagnostics = control_score(rows, spec)
         elif spec["kind"] == "logic":
             score = 1-np.mean([abs(r["R"]-r["expected"]) for r in rows.values()])
             for r in rows.values():
@@ -193,7 +233,7 @@ class ExperimentEvaluator(Evaluator):
             # Separation of the two mean neighbour-phase patterns (0..1).
             # Unstable patterns have small mean phasors and cannot score highly.
             score = float(np.mean(np.abs(patterns[0]-patterns[1]))/2)
-        return {"score": float(score), "cases": rows, "seed": config.values["seed"]}
+        return {"score": float(score), "cases": rows, "seed": config.values["seed"], **diagnostics}
 
 
 def plot_results(record, config, output):
@@ -211,6 +251,12 @@ def plot_results(record, config, output):
     sem = values.std(axis=0, ddof=1)/np.sqrt(len(values)) if len(values)>1 else np.zeros(len(names))
     axes[1].bar(names, values.mean(axis=0), yerr=sem)
     axes[1].set(ylabel="Mean output-to-reference R", ylim=(0, 1.05), title="Cases (error bars: repeat SEM)")
+    spec = record.get("protocol", {}).get("experiment", {})
+    if spec.get("objective") == "switch":
+        axes[1].axhline(spec.get("off_max", .3), color="tab:red", ls="--", label="Input-only maximum")
+        axes[1].axhline(spec.get("on_min", .9), color="tab:green", ls="--", label="Both-drives minimum")
+        axes[1].legend(fontsize=8)
+        axes[1].set_title(f"Switch targets met: {record['switch_successes']}/{record['switch_trials']} repeats")
     fig.savefig(Path(output)/"response.png", dpi=160)
     plt.close(fig)
 
