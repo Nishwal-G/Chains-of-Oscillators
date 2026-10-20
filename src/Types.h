@@ -43,6 +43,14 @@ into a single place to make it easier to pass in
 the future.*/
 enum class MobilityType { OSEEN, ROTNE_PRAGER, BLAKE };
 
+// Independent drives add forces along each target bead's local stroke axis.
+// The clock is absolute simulation time; start/stop only gate the waveform.
+struct Drive {
+    double amplitude, period, phase, start, stop;
+    int waveform; // 0 square, 1 sine, 2 constant
+    std::vector<int> beads;
+};
+
 struct SimulationConfig {
     /*scalar members*/
     int num_beads; /*Number of beads in array*/
@@ -78,6 +86,10 @@ struct SimulationConfig {
     std::vector<double> angles;
     std::vector<int> signal_beads; /*allows for signals on each bead*/
 
+    std::vector<Drive> drives;
+    bool explicit_drives = false; // Empty explicit list means no external forcing.
+    bool direct_traps = false; // H=1; avoids bead-index-dependent strengths in circuits.
+    long long seed = -1; // -1 retains the original random initialisation.
     GeometryType geometry; /*remember arrangement choice we make*/
     MobilityType mobility = MobilityType::ROTNE_PRAGER;
     // Fixed bead-centre height above z=0. Used only by Blake mode.

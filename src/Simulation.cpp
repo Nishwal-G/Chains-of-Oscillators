@@ -1,4 +1,5 @@
 #include "Simulation.h"
+#include <algorithm>
 #include <iostream>
 #include <sstream>
 #include <filesystem>
@@ -85,6 +86,28 @@ void Simulation::parseInput(const std::string& input_file) {
             else throw std::runtime_error("Unknown mobility");
             continue;
         }
+        // Repeated drive lines are intentional; all other extensions are unique.
+        if (key == "drive") {
+            Drive d;
+            int count;
+            if (!(extra >> d.amplitude >> d.period >> d.phase >> d.start >> d.stop >> d.waveform >> count)
+                || !std::isfinite(d.amplitude) || !std::isfinite(d.period)
+                || !std::isfinite(d.phase) || !std::isfinite(d.start) || !std::isfinite(d.stop)
+                || d.amplitude < 0 || d.period <= 0 || d.start < 0 || d.stop <= d.start
+                || d.waveform < 0 || d.waveform > 2 || count < 1 || count > N)
+                throw std::runtime_error("Invalid drive header");
+            for (int j=0; j<count; ++j) {
+                int bead;
+                if (!(extra >> bead) || bead < 0 || bead >= N ||
+                    std::find(d.beads.begin(), d.beads.end(), bead) != d.beads.end())
+                    throw std::runtime_error("Invalid/duplicate drive target");
+                d.beads.push_back(bead);
+            }
+            std::string excess;
+            if (extra >> excess) throw std::runtime_error("Extra drive fields");
+            config_.drives.push_back(d);
+            continue;
+        }
         if (extensions.count(key)) throw std::runtime_error("Duplicate extension: " + key);
         std::vector<double> values;
         std::string token;
@@ -155,6 +178,30 @@ void Simulation::parseInput(const std::string& input_file) {
         {"epsilon_per_bead", &config_.epsilon_per_bead}, {"lambdas", &config_.lambdas}};
     std::map<std::string, double*> scalars = {{"wall_height", &config_.wall_height},
         {"shear_x", &config_.shear_x}, {"shear_y", &config_.shear_y}};
+    // Explicit coordinates use the legacy chain first line as a container, then
+    // replace its geometry. Thus existing positional formats remain untouched.
+    if (extensions.count("reference_x") || extensions.count("reference_y")) {
+        if (extensions["reference_x"].size() != size_t(N) || extensions["reference_y"].size() != size_t(N))
+            throw std::runtime_error("reference_x/reference_y each need N values");
+        config_.geometry = GeometryType::ARBITRARY;
+        config_.initial_positions.clear();
+        for (int i=0; i<N; ++i)
+            config_.initial_positions.push_back({extensions["reference_x"][i], extensions["reference_y"][i]});
+        extensions.erase("reference_x"); extensions.erase("reference_y");
+    }
+    for (const std::string key : {"explicit_drives", "direct_traps", "seed"}) {
+        if (!extensions.count(key)) continue;
+        const auto values = extensions.at(key);
+        if (values.size()!=1 || values[0]!=std::floor(values[0]) ||
+            (key=="seed" ? (values[0]<-1 || values[0]>4294967295.0) : (values[0]!=0 && values[0]!=1)))
+            throw std::runtime_error("Invalid " + key);
+        if (key=="seed") config_.seed=static_cast<long long>(values[0]);
+        else if (key=="direct_traps") config_.direct_traps=values[0]!=0;
+        else config_.explicit_drives=values[0]!=0;
+        extensions.erase(key);
+    }
+    if (!config_.drives.empty() && !config_.explicit_drives)
+        throw std::runtime_error("Drive lines require explicit_drives 1");
     for (const auto& item : extensions) {
         if (arrays.count(item.first)) {
             if (item.second.size() != size_t(N)) throw std::runtime_error(item.first + " needs N values");
@@ -172,7 +219,7 @@ void Simulation::parseInput(const std::string& input_file) {
     }
     for (int i = 0; i < N; ++i) {
         double index = i - (N - 1) / 2.0;
-        if (!(1.0 + config_.lambdas[i]*(index*index - 0.25) > 0))
+        if (!config_.direct_traps && !(1.0 + config_.lambdas[i]*(index*index - 0.25) > 0))
             throw std::runtime_error("Nonpositive trap profile");
     }
     if (!(config_.bead_radius > 0 && config_.viscosity > 0 && config_.dt > 0 &&
@@ -193,7 +240,7 @@ void Simulation::initializeState() {
     int N = config_.num_beads;
     state_ = State(N);
 
-    std::mt19937 rng(std::random_device{}());
+    std::mt19937 rng(config_.seed < 0 ? std::random_device{}() : static_cast<unsigned>(config_.seed));
     std::uniform_real_distribution<double> dist(-0.5, 0.5);
 
     if (config_.geometry == GeometryType::CHAIN) {
@@ -282,6 +329,7 @@ void Simulation::run() {
               config_.mobility == MobilityType::OSEEN ? "oseen" : "rotne_prager")
           << "\nwall_height " << config_.wall_height
           << "\nshear_x " << config_.shear_x << "\nshear_y " << config_.shear_y << "\n";
+    hydro << "pipeline_version 2\n";
     hydro.close();
 
     double time    = 0;

@@ -7,7 +7,7 @@
 namespace modern {
 
 PhysicsEngine::PhysicsEngine(const SimulationConfig& config)
-    : config_(config), rng_(std::random_device{}()), dist_(0.0, 1.0) {}
+    : config_(config), rng_(config.seed < 0 ? std::random_device{}() : static_cast<unsigned>(config.seed)), dist_(0.0, 1.0) {}
 
 void PhysicsEngine::computeHydrodynamicTensor(const State& state, MatrixXd& tensor) const {
     if (config_.mobility == MobilityType::BLAKE) {
@@ -91,6 +91,8 @@ void PhysicsEngine::computeForces(const State& state, double time, VectorXd& for
         double C      = 1.0 - 0.25 * lambda;
         double H      = distance_ratio * (lambda * (i - i0) * (i - i0) + C);
 
+        if (config_.direct_traps) H = 1.0; // Explicit physical coefficients, independent of indices.
+
         double kx_eff = -config_.kx_per_bead[i] * H;
         double ky_eff = -config_.ky_per_bead[i] * H;
 
@@ -98,9 +100,18 @@ void PhysicsEngine::computeForces(const State& state, double time, VectorXd& for
         if (std::abs(dx) > 1e-18) fx = kx_eff * dx * config_.alpha_per_bead[i] * std::pow(std::abs(dx), config_.alpha_per_bead[i] - 2);
         if (std::abs(dy) > 1e-18) fy = ky_eff * dy * config_.beta_per_bead[i] * std::pow(std::abs(dy), config_.beta_per_bead[i] - 2);
 
-        if (std::find(config_.signal_beads.begin(), config_.signal_beads.end(), i) != config_.signal_beads.end())
-            // Matched longitudinal forcing at either driven endpoint.
-            fx += signal;
+        if (config_.explicit_drives) {
+            for (const Drive& d : config_.drives) {
+                if (time < d.start || time >= d.stop ||
+                    std::find(d.beads.begin(), d.beads.end(), i) == d.beads.end()) continue;
+                const double phase = 2.0*M_PI*time/d.period + d.phase;
+                const double wave = d.waveform == 2 ? 1.0 :
+                    d.waveform == 1 ? std::sin(phase) : (std::cos(phase)>0 ? 1.0 : -1.0);
+                fx += d.amplitude * wave;
+            }
+        } else if (std::find(config_.signal_beads.begin(), config_.signal_beads.end(), i) != config_.signal_beads.end()) {
+            fx += signal; // Exact legacy waveform and t>5 onset remain unchanged.
+        }
 
         // Mobility and noise remain in laboratory coordinates.
         forces.segment<2>(2*i) = fx * e + fy * n;
