@@ -1,4 +1,4 @@
-"""Diagnose mutual locking versus drive entrainment, with matched dt and dt/2.
+"""Diagnose mutual locking versus drive entrainment, with matched dt, dt/2 and dt/4.
 
 Reuse the simulator and established crossing-phase metrics. This is a fixed
 geometry diagnostic, not an optimiser or a replacement switch success score.
@@ -18,6 +18,8 @@ from bead_analysis import MultiBeadCoherenceAnalyzer
 from experiments import pair_metrics
 
 ROOT = Path(__file__).resolve().parents[1]
+FACTORS = (1, 2, 4)
+CASE_SCALES = {'neither': (0,0), 'input': (1,0), 'control': (0,1), 'both': (1,1)}
 LABELS = ('input_drive', 'output_drive', 'output_input')
 
 
@@ -27,22 +29,23 @@ def prepare_config(base, case, factor, seed):
     Apply the experiment's 20-samples-per-period cap once at the ORIGINAL dt.
     Multiplying both counters avoids accidentally changing feedback physics.
     """
-    if case not in ('input', 'both') or factor not in (1, 2):
-        raise ValueError('Expected input/both and timestep divisor 1/2')
+    if case not in CASE_SCALES or factor not in FACTORS:
+        raise ValueError('Unknown drive case or timestep divisor (choose 1, 2, 4)')
     values = base.values
     drives = deepcopy(values['drives'])
     period = min(d['period'] for d in drives if d['waveform'] != 'constant')
     if period < 20 * values['dt']:
         raise ValueError('Drive period needs at least 20 original integration steps')
     write = min(values['sampling_write'], int(period / (20 * values['dt'])))
-    if case == 'input':
-        drives[1]['amplitude'] = 0
+    # Shared case construction is also used by the amplitude/period sweep.
+    for drive, scale in zip(drives, CASE_SCALES[case]):
+        drive['amplitude'] *= scale
     return base.updated(drives=drives, seed=seed, dt=values['dt']/factor,
                         sampling_write=int(write)*factor,
                         sampling_feedback=int(values['sampling_feedback'])*factor)
 
 
-def diagnose(config, executable, folder, window, keep):
+def diagnose(config, executable, folder, window, keep, save_trace=True):
     """Measure both beads against the input clock and each other on one window."""
     folder.mkdir(parents=True)
     save_json(folder/'configuration.json', {'configuration': config.values})
@@ -78,13 +81,33 @@ def diagnose(config, executable, folder, window, keep):
                                     phases[:,1]-phases[:,0])) / (2*np.pi)
     trace = np.column_stack((t[mask], differences[mask]))
     # CSV preserves absolute unwrapped differences. Only plot offsets are removed.
-    np.savetxt(folder/'phase_trace.csv.gz', trace, delimiter=',',
-               header='time,input_minus_drive_cycles,output_minus_drive_cycles,output_minus_input_cycles', comments='')
+    if save_trace:
+        np.savetxt(folder/'phase_trace.csv.gz', trace, delimiter=',',
+                   header='time,input_minus_drive_cycles,output_minus_drive_cycles,output_minus_input_cycles', comments='')
     save_json(folder/'metrics.json', metrics)
     if not keep:
         shutil.rmtree(raw)  # Remove only this successful task's bulky raw output.
     return metrics, trace
 
+
+def validate_protocol(base, window):
+    """Validate the shared two-drive diagnostic protocol before launching runs."""
+    drives = base.values['drives']
+    if not drives or len(drives) != 2 or any(len(base.targets(g)) != 1 for g in ('input','control','output')):
+        raise ValueError('Expected two drives and singleton input, control, output groups')
+    if any(base.targets(d['targets']) != base.targets(g) for d,g in zip(drives,('input','control'))):
+        raise ValueError('Drive 0 must target input; drive 1 must target control')
+    if len({base.targets(g)[0] for g in ('input','control','output')}) != 3:
+        raise ValueError('Input, control and output must be different beads')
+    if drives[0]['waveform'] == 'constant' or drives[0]['amplitude'] == 0:
+        raise ValueError('Input needs a nonzero periodic drive')
+    start, stop = window
+    if not np.all(np.isfinite(window)) or not 0 <= start < stop < base.values['total_time']:
+        raise ValueError('Choose a finite window inside the simulation, ending before total_time')
+    if any(d['start'] > start or d['stop'] < stop for d in drives):
+        raise ValueError('Both drive schedules must cover the measurement window')
+    if base.values['temperature'] != 0:
+        raise ValueError('This matched-initial-condition diagnostic currently requires temperature=0')
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
@@ -102,31 +125,21 @@ def main():
         p.error('Positive counts and a nonnegative seed required')
     if not args.exe.is_file():
         p.error('Missing executable: run make -C src')
-    drives = base.values['drives']
-    if not drives or len(drives) != 2 or any(len(base.targets(g)) != 1 for g in ('input','control','output')):
-        p.error('Expected two drives and singleton input, control, output groups')
-    if any(base.targets(d['targets']) != base.targets(g) for d,g in zip(drives,('input','control'))):
-        p.error('Drive 0 must target input; drive 1 must target control')
-    if drives[0]['waveform'] == 'constant' or drives[0]['amplitude'] == 0:
-        p.error('Input needs a nonzero periodic drive')
-    start, stop = args.window
-    if not np.all(np.isfinite(args.window)) or not 0 <= start < stop < base.values['total_time']:
-        p.error('Choose a finite window inside the simulation, ending before total_time')
-    if any(d['start'] > start or d['stop'] < stop for d in drives):
-        p.error('Both drive schedules must cover the measurement window')
-    if base.values['temperature'] != 0:
-        p.error('This matched-initial-condition diagnostic currently requires temperature=0')
+    try:
+        validate_protocol(base, args.window)
+    except ValueError as exc:
+        p.error(str(exc))
     out = (args.out or ROOT/'results'/('switch_diagnostic_'+datetime.now().strftime('%Y%m%d_%H%M%S_%f'))).resolve()
     out.mkdir(parents=True, exist_ok=False)
     save_json(out/'protocol.json', {'configuration':base.values, 'window':args.window,
-              'runs':args.runs,'seed':args.seed,'executable_sha256':fingerprint(args.exe),
+              'runs':args.runs,'seed':args.seed,'timestep_divisors':list(FACTORS),'executable_sha256':fingerprint(args.exe),
               'code_sha256':{name:fingerprint(ROOT/'analysis'/name) for name in
                             ('diagnose_switch.py','simulation.py','experiments.py','bead_analysis.py')}})
     jobs = {}
     with ThreadPoolExecutor(max_workers=args.cores) as pool:
         for rep in range(args.runs):
             for case in ('input','both'):
-                for factor in (1,2):
+                for factor in FACTORS:
                     config = prepare_config(base, case, factor, args.seed+rep)
                     key = (rep,case,factor)
                     jobs[key] = pool.submit(diagnose, config, args.exe.resolve(),
@@ -139,7 +152,7 @@ def main():
     for rep in range(args.runs):
         fig, axes = plt.subplots(3,2,figsize=(12,9),sharex=True)
         for col, case in enumerate(('input','both')):
-            for factor, style in ((1,'-'),(2,'--')):
+            for factor, style in ((1,'-'),(2,'--'),(4,':')):
                 trace = results[rep,case,factor][1]
                 for row in range(3):
                     axes[row,col].plot(trace[:,0], trace[:,row+1]-trace[0,row+1],
@@ -160,8 +173,11 @@ def main():
             for metric in ('R','frequency_mismatch','slip_count'):
                 original = np.array([results[r,case,1][0][relation][metric] for r in range(args.runs)])
                 refined = np.array([results[r,case,2][0][relation][metric] for r in range(args.runs)])
+                quarter = np.array([results[r,case,4][0][relation][metric] for r in range(args.runs)])
                 row = {'case':case,'relation':relation,'metric':metric}
-                for name, values in [('original',original),('half_dt',refined),('paired_change',refined-original)]:
+                for name, values in [('original',original),('half_dt',refined),('paired_change',refined-original),
+                                     ('quarter_dt',quarter),('quarter_minus_half',quarter-refined),
+                                     ('quarter_minus_original',quarter-original)]:
                     row[name+'_mean'] = float(values.mean())
                     row[name+'_sem'] = float(values.std(ddof=1)/np.sqrt(args.runs)) if args.runs > 1 else None
                 summary.append(row)
