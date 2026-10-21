@@ -11,7 +11,7 @@ class DiagnosticTests(unittest.TestCase):
     def test_matched_protocol(self):
         base = load_configuration(ROOT/'templates/computing/junction_diagnostic.json')
         original = prepare_config(base,'both',1,550000)
-        refined = prepare_config(base,'both',2,550000)
+        refined = prepare_config(base,'both',4,550000)
         for key in ('sampling_write','sampling_feedback'):
             self.assertEqual(original.values['dt']*original.values[key],
                              refined.values['dt']*refined.values[key])
