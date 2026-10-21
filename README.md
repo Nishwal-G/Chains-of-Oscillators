@@ -781,3 +781,22 @@ Both optimisers reuse the existing search, run, audit and checkpoint machinery.
 Only the chosen experiment and score differ. New search coordinates include
 `reference_x[2]`, `reference_y[2]`, and `drives[1].amplitude`; see the added section
 in search_help.txt. Rebuild the C++ executable after applying the update.
+
+
+## Offset control-branch geometry search
+
+The optional `analysis/run_offset_search.py` runner adds a geometry-only
+experiment: control beads 2 and 3 can move sideways as well as vertically,
+while the junction stays anchored. Seven coordinates are searched; traps,
+stroke angles and drive periods are fixed, with input/control amplitudes 0.5/5.
+The switch objective and underlying simulator are unchanged.
+
+Use `--bases path/to/candidate1/best.json path/to/candidate2/best.json` to
+create centred, left-offset and right-offset starts from each saved candidate.
+Without `--bases`, three generic starts are generated from the supplied template;
+previous validated candidates are not bundled in this repository.
+
+The runner reuses the existing optimisation and experiment CLIs, then validates
+the top two candidates on fresh seeds. See [RUN_OFFSET.md](RUN_OFFSET.md) for
+commands, bounds, run sizes and interpretation. No old result directories need
+to be removed. These are exploratory layouts, not demonstrated switches.
