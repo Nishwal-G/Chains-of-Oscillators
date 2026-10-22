@@ -1,4 +1,4 @@
-"""Four explicit stages: confirm drives, search geometry, validate, test switching.
+"""Confirm drives, search geometry, validate, and test single/repeated switching.
 
 Use the same work folder for successive stages. Each stage refuses to overwrite
 previous results. The runner calls the existing optimiser; only signal scoring
@@ -41,23 +41,30 @@ def timed(config, total, seed):
     return config.updated(total_time=total,seed=seed,drives=drives)
 
 
-def sequence_repeat(config, spec, out, exe, seed):
+def sequence_repeat(config, spec, out, exe, seed, schedule=None):
     """One continuous trajectory: retain state at control transitions.
 
     Offline crossing phases are used; stage windows avoid transitions. No
     causal latency is inferred from interpolated phases across a transition.
     """
     out.mkdir(parents=True)
-    config=timed(config,200,seed)
-    input_drive,control=deepcopy(config.values['drives'])
-    first=deepcopy(control); first['stop']=65
-    last=deepcopy(control); last.update(start=130,stop=200)
-    config=config.updated(drives=[input_drive,first,last])
+    # Optional schedule reuses the same simulation and phase-analysis path.
+    if schedule is None:
+        config=timed(config,200,seed)
+        input_drive,control=deepcopy(config.values['drives'])
+        first=deepcopy(control); first['stop']=65
+        last=deepcopy(control); last.update(start=130,stop=200)
+        config=config.updated(drives=[input_drive,first,last])
+        windows=[('on_1',45,60),('off',105,120),('on_2',175,190)]
+    else:
+        config=config.updated(seed=seed)
+        input_drive=config.values['drives'][0]
+        windows=[(r['stage'], *r['window']) for r in schedule]
     save_json(out/'configuration.json',{'configuration':config.values})
     reader=run_simulation(config,exe,out/'simulation')
     analyser=phase_analyser(config,reader)
     rows=[]
-    for name,start,stop in [('on_1',45,60),('off',105,120),('on_2',175,190)]:
+    for name,start,stop in windows:
         row,_=measure_window(analyser,config,spec,config.targets('output'),config.targets('input')[0],start,stop,np.pi/4)
         rows.append({'stage':name,**row})
     t=np.asarray(analyser.time_series)
@@ -74,7 +81,7 @@ def sequence_repeat(config, spec, out, exe, seed):
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--stage',choices=['confirm','search','validate','sequence'],required=True)
+    p.add_argument('--stage',choices=['confirm','search','validate','sequence','cycles'],required=True)
     p.add_argument('--work',type=Path,default=ROOT/'results/signal_switch_pipeline')
     p.add_argument('--config',type=Path,default=TEMPLATES/'junction_diagnostic.json')
     p.add_argument('--exe',type=Path,default=ROOT/'src/rowers')
@@ -84,6 +91,9 @@ def main():
     p.add_argument('--iterations',type=int,default=100)
     p.add_argument('--perturbations',type=int,default=2)
     p.add_argument('--position-jitter',type=float,default=.2,help='Uniform +/- displacement in coordinate units')
+    p.add_argument('--cycle-protocol',type=Path,default=TEMPLATES/'switch_cycles.json')
+    p.add_argument('--cycle-out',type=Path,default=None,
+                   help='Fresh cycle output folder; defaults to WORK/cycles')
     args=p.parse_args()
     if min(args.cores,args.runs,args.search_runs)<1 or args.iterations<0 or args.perturbations<0:
         p.error('Invalid repeat/iteration counts')
@@ -91,6 +101,10 @@ def main():
         p.error('position-jitter must be finite and nonnegative')
     exe=args.exe.resolve()
     if not exe.is_file(): p.error('Missing src/rowers; run make -C src')
+    if args.stage=='cycles':
+        from switch_cycles import run_cycles
+        run_cycles(args, sequence_repeat)
+        return
     work=args.work.resolve(); work.mkdir(parents=True,exist_ok=True)
     # Freeze configuration, protocol and free coordinates on the first stage.
     # Later stages use this snapshot, even if templates are edited meanwhile.

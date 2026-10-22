@@ -40,3 +40,25 @@ def signal_switch_score(rows, spec):
                                 and all(v==0 for values in off_losses.values() for v in values))
     score = -sum(details[k] for k in ('input_loss','on_loss','off_loss','control_penalty'))
     return float(score),details
+
+
+def classify_locking(metric, criteria):
+    """Diagnostic labels only: leave the existing optimisation score unchanged.
+
+    Slipping requires BOTH sustained frequency drift and detected full slips.
+    Intermediate/invalid measurements are inconclusive, never automatic passes.
+    """
+    keys = ('phase_consistency_R', 'relative_frequency_mismatch',
+            'slip_candidates_total')
+    if metric.get('status') != 'ok' or any(
+            not np.isfinite(metric.get(k, np.nan)) for k in keys):
+        return 'inconclusive'
+    mismatch = abs(metric['relative_frequency_mismatch'])
+    slips = metric['slip_candidates_total']
+    if (metric['phase_consistency_R'] >= criteria['on_min']
+            and mismatch <= criteria['frequency_tolerance'] and slips == 0):
+        return 'locked'
+    if (mismatch >= criteria['slipping_frequency_min']
+            and slips >= criteria['slipping_min_slips']):
+        return 'slipping'
+    return 'inconclusive'
