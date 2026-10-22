@@ -16,12 +16,13 @@ import matplotlib.pyplot as plt
 
 from simulation import load_configuration, run_simulation, save_json, fingerprint, drive_coordinate
 from optimisation import Evaluator
+from signal_switch import signal_switch_score
 from bead_analysis import MultiBeadCoherenceAnalyzer
 
 
 def validate_experiment(spec):
     """Small explicit schema, so typos cannot silently change an objective."""
-    allowed = {"kind", "cases", "output", "reference", "period", "threshold", "ring", "objective", "off_max", "on_min"}
+    allowed = {"kind", "cases", "output", "reference", "period", "threshold", "ring", "objective", "off_max", "on_min", "frequency_tolerance", "max_slips"}
     if set(spec) - allowed or spec.get("kind") not in ("control", "logic", "memory"):
         raise ValueError("Experiment kind must be control, logic or memory; unknown keys are rejected")
     if not np.isfinite(spec.get("period", 0)) or spec["period"] <= 0:
@@ -30,16 +31,22 @@ def validate_experiment(spec):
         raise ValueError("threshold must lie between zero and one")
     # New scoring is opt-in: existing protocols retain their original objective.
     objective = spec.get("objective", "contrast")
-    if objective not in ("contrast", "switch"):
-        raise ValueError("objective must be contrast or switch")
+    if objective not in ("contrast", "switch", "signal_switch"):
+        raise ValueError("objective must be contrast, switch or signal_switch")
     if spec["kind"] != "control" and any(k in spec for k in ("objective", "off_max", "on_min")):
         raise ValueError("objective/off_max/on_min apply only to control experiments")
-    if objective != "switch" and any(k in spec for k in ("off_max", "on_min")):
+    if objective not in ("switch", "signal_switch") and any(k in spec for k in ("off_max", "on_min")):
         raise ValueError("off_max/on_min require objective=switch")
-    if objective == "switch":
+    if objective in ("switch", "signal_switch"):
         off, on = spec.get("off_max", .3), spec.get("on_min", .9)
         if not np.all(np.isfinite([off, on])) or not 0 <= off < on <= 1:
             raise ValueError("Require 0 <= off_max < on_min <= 1")
+    if objective != "signal_switch" and any(k in spec for k in ("frequency_tolerance","max_slips")):
+        raise ValueError("frequency_tolerance/max_slips require signal_switch")
+    if objective == "signal_switch":
+        tolerance, slips = spec.get("frequency_tolerance",.01), spec.get("max_slips",0)
+        if not np.isfinite(tolerance) or tolerance <= 0 or not isinstance(slips,int) or slips < 0:
+            raise ValueError("Positive frequency_tolerance and nonnegative integer max_slips required")
     cases = spec.get("cases", [])
     if not cases or len({c["name"] for c in cases}) != len(cases):
         raise ValueError("Cases need unique names")
@@ -73,6 +80,8 @@ def control_score(rows, spec):
     control-only entrainment penalty; zero is the best possible switch score.
     These are design targets for phase coherence, not proof of information flow.
     """
+    if spec.get("objective") == "signal_switch":
+        return signal_switch_score(rows,spec)
     off_r, on_r = rows["input"]["R"], rows["both"]["R"]
     penalty = max(0.0, rows["control"]["R"] - rows["neither"]["R"])
     if spec.get("objective", "contrast") == "contrast":
@@ -126,6 +135,17 @@ def measure_window(analyser, config, spec, output, reference, start, stop, slip_
             signals.append({"bead": bead, **signal})
     row = {"R": float(np.mean([m["R"] for m in pairs])), "pairs": pairs,
            "signal_metrics": signals, "window": [start, stop]}
+    if spec.get("objective") == "signal_switch":
+        if not drive or drive["waveform"] == "constant":
+            raise ValueError("Signal-switch objective needs a periodic input clock")
+        # Reuse the same fixed-reference phase convention for input and output.
+        pair_metrics(analyser, reference, reference, start, stop, spec["period"], slip_hysteresis)
+        row["input_signal"] = analyser.measure_signal_locking(reference, drive["period"],start,stop,
+            signal_phase=drive["phase"],slip_hysteresis=slip_hysteresis)
+        if row["input_signal"]["status"] != "ok" or any(m["status"] != "ok" for m in signals):
+            raise ValueError("Incomplete signal phase coverage")
+        row["pair_R"] = row["R"]  # Preserve mutual coherence as a diagnostic.
+        row["R"] = float(np.mean([m["phase_consistency_R"] for m in signals]))
     pattern = None
     if spec["kind"] == "memory":
         ring = config.targets(spec["ring"])
@@ -151,15 +171,20 @@ class ExperimentEvaluator(Evaluator):
         super().__init__(*args, **kwargs)
         validate_experiment(experiment)
         self.experiment = deepcopy(experiment)
+        if experiment.get("objective") == "signal_switch":
+            self.protocol["code_sha256"]["signal_switch.py"] = fingerprint(Path(__file__).with_name("signal_switch.py"))
         self.protocol.update(objective="computing_experiment_v1", experiment=self.experiment)
         self.protocol["code_sha256"]["experiments.py"] = fingerprint(__file__)
 
     def summarise(self, replicates):
         # Report individual-repeat reliability separately from the mean score.
-        if self.experiment.get("objective") == "switch":
+        if self.experiment.get("objective") in ("switch", "signal_switch"):
             successes = sum(r["switch_success"] for r in replicates)
             return {"switch_successes": successes, "switch_trials": len(replicates),
                     "switch_success_fraction": successes / len(replicates),
+                    **({"input_success_fraction":float(np.mean([r["input_success"] for r in replicates])),
+                        "input_loss":float(np.mean([r["input_loss"] for r in replicates]))}
+                       if self.experiment.get("objective")=="signal_switch" else {}),
                     **{key: float(np.mean([r[key] for r in replicates]))
                        for key in ("off_loss", "on_loss", "control_penalty")}}
         return {}
@@ -176,6 +201,21 @@ class ExperimentEvaluator(Evaluator):
         reference = config.targets(spec.get("reference", "input"))[0]
         if reference in output:
             raise ValueError("Output must not include its own reference bead")
+        if spec.get("objective") == "signal_switch":
+            drives = config.values["drives"]
+            if len(drives)!=2 or config.targets(drives[0]["targets"]) != [reference]:
+                raise ValueError("Signal-switch requires drive 0 on the single reference/input bead and drive 1 on control")
+            if config.targets(drives[1]["targets"]) != config.targets("control"):
+                raise ValueError("Drive 1 must target the control group")
+            if drives[0]["waveform"] == "constant" or any(d["amplitude"] <= 0 for d in drives):
+                raise ValueError("Signal-switch requires a periodic input and positive drive amplitudes")
+            for case in spec["cases"]:
+                for start,stop in [case["window"]]+case.get("windows",[]):
+                    if any(d["start"] > start or d["stop"] < stop for d in drives):
+                        raise ValueError("Both drive schedules must cover all stationary measurement windows")
+            expected = {"neither":[0,0],"input":[1,0],"control":[0,1],"both":[1,1]}
+            if any(c.get("scales")!=expected[c["name"]] or c.get("overrides") for c in spec["cases"]):
+                raise ValueError("Signal-switch requires standard four cases without overrides")
         rows, patterns = {}, []
         for case in spec["cases"]:
             current = config.updated(**case.get("overrides", {}))
@@ -252,11 +292,13 @@ def plot_results(record, config, output):
     axes[1].bar(names, values.mean(axis=0), yerr=sem)
     axes[1].set(ylabel="Mean output-to-reference R", ylim=(0, 1.05), title="Cases (error bars: repeat SEM)")
     spec = record.get("protocol", {}).get("experiment", {})
-    if spec.get("objective") == "switch":
-        axes[1].axhline(spec.get("off_max", .3), color="tab:red", ls="--", label="Input-only maximum")
+    if spec.get("objective") in ("switch", "signal_switch"):
+        axes[1].axhline(spec.get("off_max", .3), color="tab:red", ls="--", label="Off-case maximum" if spec.get("objective")=="signal_switch" else "Input-only maximum")
         axes[1].axhline(spec.get("on_min", .9), color="tab:green", ls="--", label="Both-drives minimum")
         axes[1].legend(fontsize=8)
         axes[1].set_title(f"Switch targets met: {record['switch_successes']}/{record['switch_trials']} repeats")
+    if spec.get("objective") == "signal_switch":
+        axes[1].set_ylabel("Mean output-to-input-drive R")
     fig.savefig(Path(output)/"response.png", dpi=160)
     plt.close(fig)
 

@@ -45,17 +45,21 @@ def prepare_config(base, case, factor, seed):
                         sampling_feedback=int(values['sampling_feedback'])*factor)
 
 
+def phase_analyser(config, reader):
+    """Shared fixed trap-reference phases for stationary and sequential tests."""
+    theta = np.deg2rad(config.values['angles_deg'])
+    xy = config.reference_positions
+    references = np.column_stack((xy[:,0]*np.cos(theta)+xy[:,1]*np.sin(theta),
+                                  -xy[:,0]*np.sin(theta)+xy[:,1]*np.cos(theta)))
+    return MultiBeadCoherenceAnalyzer(reader.time_series, reader.analysis_positions, references)
+
 def diagnose(config, executable, folder, window, keep, save_trace=True):
     """Measure both beads against the input clock and each other on one window."""
     folder.mkdir(parents=True)
     save_json(folder/'configuration.json', {'configuration': config.values})
     raw = folder/'simulation'
     reader = run_simulation(config, executable, raw)
-    theta = np.deg2rad(config.values['angles_deg'])
-    xy = config.reference_positions
-    references = np.column_stack((xy[:,0]*np.cos(theta)+xy[:,1]*np.sin(theta),
-                                  -xy[:,0]*np.sin(theta)+xy[:,1]*np.cos(theta)))
-    analyser = MultiBeadCoherenceAnalyzer(reader.time_series, reader.analysis_positions, references)
+    analyser = phase_analyser(config, reader)
     bead_in, bead_out = config.targets('input')[0], config.targets('output')[0]
     drive = config.values['drives'][0]
     start, stop = window
