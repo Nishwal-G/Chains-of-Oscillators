@@ -1,0 +1,57 @@
+{
+  "kind": "control",
+  "output": "output",
+  "reference": "input",
+  "period": 0.184715,
+  "cases": [
+    {
+      "name": "neither",
+      "scales": [
+        0,
+        0
+      ],
+      "window": [
+        60,
+        95
+      ]
+    },
+    {
+      "name": "input",
+      "scales": [
+        1,
+        0
+      ],
+      "window": [
+        60,
+        95
+      ]
+    },
+    {
+      "name": "control",
+      "scales": [
+        0,
+        1
+      ],
+      "window": [
+        60,
+        95
+      ]
+    },
+    {
+      "name": "both",
+      "scales": [
+        1,
+        1
+      ],
+      "window": [
+        60,
+        95
+      ]
+    }
+  ],
+  "objective": "signal_switch",
+  "off_max": 0.3,
+  "on_min": 0.9,
+  "frequency_tolerance": 0.01,
+  "max_slips": 0
+}
