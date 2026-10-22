@@ -1,0 +1,16 @@
+{
+  "amplitude": 3,
+  "cycles": 5,
+  "on_duration": 65,
+  "off_duration": 65,
+  "settling_time": 45,
+  "measurement_duration": 15,
+  "dt_divisors": [1, 2],
+  "seed": 2150000,
+  "classification": {
+    "on_min": 0.9,
+    "frequency_tolerance": 0.01,
+    "slipping_frequency_min": 0.02,
+    "slipping_min_slips": 2
+  }
+}
