@@ -1,0 +1,16 @@
+{
+  "initial_load_gaps": [8, 12, 16],
+  "original_coordinates": {
+    "reference_x[0]": {"half_width": 8, "step": 0.8},
+    "reference_x[1]": {"half_width": 6, "step": 0.6},
+    "reference_x[2]": {"half_width": 8, "step": 0.8},
+    "reference_y[2]": {"half_width": 8, "step": 0.8},
+    "reference_x[3]": {"half_width": 6, "step": 0.6},
+    "reference_y[3]": {"half_width": 6, "step": 0.6},
+    "reference_x[5]": {"half_width": 6, "step": 0.6}
+  },
+  "load_x_min_offset": 5,
+  "load_x_padding": 20,
+  "load_y_half_width": 12,
+  "load_step": 0.8
+}
