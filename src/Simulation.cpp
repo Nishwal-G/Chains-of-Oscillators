@@ -410,7 +410,7 @@ void Simulation::activeTrapping() {
 
 void Simulation::saveData(std::ostream& out, int frame, double time) {
     // Record the actual simulation time, not a time inferred from frame.
-    out.precision(9);
+    out.precision(17);
     out << frame << " " << time << " ";
 
     out.precision(6);
@@ -430,7 +430,7 @@ void Simulation::saveTraps(std::ostream& out, int frame) {
 
 void Simulation::saveForces(std::ostream& out, int frame, double time) {
     // Forces must be calculated for this time before calling this function.
-    out.precision(9);
+    out.precision(17);
     out << frame << " " << time << " ";
 
     out.precision(6);
