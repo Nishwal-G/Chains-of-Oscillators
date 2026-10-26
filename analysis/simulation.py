@@ -550,16 +550,14 @@ def run_simulation(config, executable, folder):
         for k in EXTENSION_SCALARS):
         raise RuntimeError("Simulator mobility settings disagree with configuration")
     spacing = config.values["dt"] * config.values["sampling_write"]
-    # Older C++ files printed timestamps with nine significant digits.
-    # Subtracting two rounded timestamps can introduce one last-digit unit
-    # of error. Accommodate that output rounding, retaining all other checks.
+    # Legacy trajectories printed nine significant digits. The difference of
+    # two rounded timestamps can differ by one unit of the last printed digit.
     largest_time = max(1.0, float(np.max(np.abs(reader.time_series))))
     timestamp_rounding = 10.0 ** (np.floor(np.log10(largest_time)) - 8)
     if (
         reader.num_beads != config.n
         or not np.all(np.isfinite(reader.positions))
-        or not np.allclose(np.diff(reader.time_series), spacing, rtol=1e-4,
-                           atol=1e-8 + timestamp_rounding)
+        or not np.allclose(np.diff(reader.time_series), spacing, rtol=1e-4, atol=1e-8 + timestamp_rounding)
         or abs(reader.time_series[-1] - config.values["total_time"]) > 2 * spacing
     ):
         raise RuntimeError(f"Invalid trajectory dimensions/timestamps: {files[0]}")

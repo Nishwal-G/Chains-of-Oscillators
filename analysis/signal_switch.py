@@ -62,3 +62,49 @@ def classify_locking(metric, criteria):
             and slips >= criteria['slipping_min_slips']):
         return 'slipping'
     return 'inconclusive'
+
+
+# Both objectives use the same external-clock measurements. The original
+# signal_switch objective retains its low-coherence OFF target unchanged.
+SIGNAL_OBJECTIVES = ('signal_switch', 'signal_slip_switch')
+
+
+def slipping_loss(metric, spec):
+    """Bounded target deficits: do not reward unlimited drift or extra slips."""
+    if metric.get('status') != 'ok':
+        raise ValueError('Slipping objective needs complete phase coverage')
+    drift = abs(metric['relative_frequency_mismatch'])
+    slips = metric['slip_candidates_total']
+    return (max(0., 1-drift/spec['slipping_frequency_min']) +
+            max(0., 1-slips/spec['slipping_min_slips']))
+
+
+def signal_slip_switch_score(rows, spec):
+    """Every monitored output must lock in BOTH and slip in all other cases.
+
+    Penalise the worst output in each case, so adding outputs cannot dilute
+    one bad bead's loss. Input locking is required only while input is driven.
+    A score of zero meets every finite-window target; negative is worse.
+    """
+    input_losses = [locking_loss(rows[c]['input_signal'], spec) for c in ('input','both')]
+    output = {}
+    for case in ('neither','input','control','both'):
+        output[case] = {
+            str(m['bead']): (locking_loss(m,spec) if case=='both' else slipping_loss(m,spec))
+            for m in rows[case]['signal_metrics']}
+        if not output[case]:
+            raise ValueError('At least one output bead is required')
+    bead_ids = set(output['both'])
+    if any(set(v)!=bead_ids for v in output.values()):
+        raise ValueError('All cases must measure the same outputs')
+    details = {
+        'input_loss':max(input_losses),
+        'on_loss':max(output['both'].values()),
+        'off_loss':max(output['input'].values()),
+        'control_penalty':max(max(output[c].values()) for c in ('neither','control')),
+        'input_success':all(v==0 for v in input_losses),
+        'output_success':{b:all(output[c][b]==0 for c in output) for b in bead_ids},
+        'output_losses':output,
+    }
+    details['switch_success'] = details['input_success'] and all(details['output_success'].values())
+    return -float(sum(details[k] for k in ('input_loss','on_loss','off_loss','control_penalty'))),details

@@ -110,8 +110,14 @@ def aggregate(repeats):
     return result
 
 
-def plot_trace(t, delta, windows, destination):
-    fig, axes = plt.subplots(2, 1, figsize=(12, 6), sharex=True, layout='constrained')
+def plot_trace(t, delta, windows, destination, labels=None):
+    # The same plotting function supports one or several monitored outputs.
+    labels = labels or ['Input', 'Output']
+    if len(labels) != delta.shape[1]:
+        raise ValueError('One label is required per phase trace')
+    fig, axes = plt.subplots(len(labels), 1, figsize=(12, 3*len(labels)),
+                             sharex=True, layout='constrained')
+    axes = np.atleast_1d(axes)
     for column, ax in enumerate(axes):
         valid = np.isfinite(delta[:, column])
         if valid.any():
@@ -119,7 +125,7 @@ def plot_trace(t, delta, windows, destination):
         for window in windows:
             if window['control_on']:
                 ax.axvspan(*window['block'], color='green', alpha=.12)
-        ax.set_ylabel(('Input' if column == 0 else 'Output') + ' − drive (cycles)')
+        ax.set_ylabel(labels[column] + ' − drive (cycles)')
     axes[0].set_title('Green: control ON; phase offset removed, drift retained')
     axes[-1].set_xlabel('Simulation time')
     fig.savefig(destination, dpi=150)

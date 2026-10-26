@@ -69,9 +69,14 @@ def sequence_repeat(config, spec, out, exe, seed, schedule=None):
         rows.append({'stage':name,**row})
     t=np.asarray(analyser.time_series)
     clock=2*np.pi*t/input_drive['period']+input_drive['phase']
-    delta=np.column_stack([(analyser._get_phase(config.targets(g)[0])-clock)/(2*np.pi)
-                           for g in ('input','output')])
-    np.savez_compressed(out/'phase_trace.npz',time=t,input_minus_drive=delta[:,0],output_minus_drive=delta[:,1])
+    # Keep the original input/first-output columns, then include additional
+    # output beads so load tests retain individual traces rather than averages.
+    trace_beads=[config.targets('input')[0], *config.targets('output')]
+    delta=np.column_stack([(analyser._get_phase(bead)-clock)/(2*np.pi)
+                           for bead in trace_beads])
+    np.savez_compressed(out/'phase_trace.npz',time=t,input_minus_drive=delta[:,0],
+                        output_minus_drive=delta[:,1],bead_indices=trace_beads,
+                        phase_minus_drive=delta)
     save_json(out/'stages.json',rows)
     # Raw data are no longer needed; exact configuration and phase traces remain.
     import shutil
