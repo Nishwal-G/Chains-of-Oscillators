@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "control_ratio": 0.5,
+  "fractions": [0, 0.25, 0.5, 0.75, 1],
+  "stationary": {"duration": 100, "window": [60, 95]},
+  "phase": {"time": 40, "pre": [25, 35], "post": [65, 95], "shifts": [-0.7853981633974483, 0.7853981633974483]},
+  "cycles": {"count": 3, "block_duration": 65, "window": 10, "stride": 1, "dwell_windows": 3},
+  "criteria": {"on_min": 0.95, "off_max": 0.3, "frequency_tolerance": 0.01, "max_slips": 0, "slip_hysteresis": 0.7853981633974483},
+  "weights": {"contrast": 1, "difference": 1, "phase": 1, "off": 2, "on": 2, "leakage": 2, "input": 2, "monotonicity": 0.5, "cycles": 1},
+  "objective_cycles": true,
+  "training_disorder": 0.05,
+  "robustness": {"stiffness_fractions": [0, 0.05, 0.1], "temperature_offsets": [0, 0.01, 0.1]},
+  "map": {"frequency_ratios": [0.9, 0.95, 1, 1.05, 1.1], "control_fractions": [0, 0.25, 0.5, 0.75, 1]}
+}
