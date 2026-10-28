@@ -257,6 +257,34 @@ def optimise(args):
     if args.set:
         base = base.updated(**{key: json.loads(value) for key, value in args.set})
     specification = json.loads(Path(args.search).read_text())
+    modes = [getattr(args, k, None) for k in ("experiment", "transistor", "device", "fast_device")]
+    if sum(bool(v) for v in modes) > 1:
+        raise ValueError("Choose only one experiment/objective mode")
+    if getattr(args, "fast_device", None):
+        if not getattr(args, "fast_spec", None):
+            raise ValueError("--fast-device requires --fast-spec")
+        if any(not k.startswith(("reference_x[", "reference_y[")) for k in specification):
+            raise ValueError("Fast device search accepts indexed geometry coordinates only")
+        if base.values["seed"] < 0:
+            raise ValueError("Set a fixed simulator seed for fast search")
+    elif getattr(args, "fast_spec", None):
+        raise ValueError("--fast-spec requires --fast-device")
+    if getattr(args, "transistor", None):
+        if args.experiment:
+            raise ValueError("Use either --transistor or --experiment")
+        # The control sweep is fixed by the protocol; optimising this coordinate
+        # would silently have no effect. Keep the first version geometry-only.
+        if any(not k.startswith(("reference_x[", "reference_y[")) for k in specification):
+            raise ValueError("Transistor search currently accepts indexed geometry coordinates only")
+        if base.values["seed"] < 0:
+            raise ValueError("Set a fixed simulator seed for matched transistor search")
+    if getattr(args, "device", None):
+        if args.experiment or getattr(args, "transistor", None):
+            raise ValueError("Use only one of --device, --transistor or --experiment")
+        if any(not k.startswith(("reference_x[", "reference_y[")) for k in specification):
+            raise ValueError("Device search accepts indexed geometry coordinates only")
+        if base.values["seed"] < 0:
+            raise ValueError("Set a fixed simulator seed for device search")
     space = ParameterSpace(base, specification)
     if (
         args.iterations < 0
@@ -274,6 +302,22 @@ def optimise(args):
         from experiments import ExperimentEvaluator
         evaluator_class = ExperimentEvaluator
         extra["experiment"] = json.loads(Path(args.experiment).read_text())
+    if getattr(args, "transistor", None):
+        from transistor import TransistorEvaluator
+        evaluator_class = TransistorEvaluator
+        extra["transistor"] = json.loads(Path(args.transistor).read_text())
+    if getattr(args, "device", None):
+        from transistor_device import DeviceEvaluator, check_source
+        evaluator_class = DeviceEvaluator
+        extra["device"] = json.loads(Path(args.device).read_text())
+        check_source(base, extra["device"])
+    if getattr(args, "fast_device", None):
+        from transistor_fast import FastDeviceEvaluator
+        from transistor_device import check_source
+        evaluator_class = FastDeviceEvaluator
+        extra["device"] = json.loads(Path(args.fast_device).read_text())
+        extra["fast"] = json.loads(Path(args.fast_spec).read_text())
+        check_source(base, extra["device"])
     evaluator = evaluator_class(
         args.exe,
         output,
@@ -436,6 +480,10 @@ def main():
     p.add_argument("--method", choices=["metropolis", "bayesian"], default="metropolis")
     p.add_argument("--config", default="templates/6beads.input")
     p.add_argument("--search", default="search.json")
+    p.add_argument("--fast-device", help="Device protocol for the cheaper transfer-shape search")
+    p.add_argument("--fast-spec", help="Fast search grid and weights JSON")
+    p.add_argument("--device", help="Weak-control device protocol with input-phase intervention and cycle objective")
+    p.add_argument("--transistor", help="Opt-in multi-amplitude coherence transistor protocol JSON")
     p.add_argument("--experiment", help="Experiment JSON; omitted preserves the existing diode objective")
     p.add_argument(
         "--set",
